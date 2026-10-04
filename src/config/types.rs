@@ -4729,6 +4729,29 @@ mod tests {
         }
     }
 
+    // `is_unsegmented` re-implements `SegmentationMode::parse` because the
+    // backend module is a stub without the feature. Tie the two together so
+    // the config warnings never disagree with what the backend does.
+    #[cfg(feature = "local-whisper")]
+    #[test]
+    fn local_whisper_is_unsegmented_matches_backend_parse() {
+        use crate::transcription::local_whisper::SegmentationMode;
+
+        for segmentation in [
+            "none", " NONE ", "None", "silence", "window", "bogus", "", "nones",
+        ] {
+            let config = LocalWhisperConfig {
+                segmentation: segmentation.to_string(),
+                ..LocalWhisperConfig::new("/m.bin".to_string())
+            };
+            assert_eq!(
+                config.is_unsegmented(),
+                SegmentationMode::parse(segmentation) == SegmentationMode::Unsegmented,
+                "segmentation {segmentation:?}"
+            );
+        }
+    }
+
     #[test]
     fn config_validate_local_whisper_streaming_warnings_point_at_no_segmentation() {
         // On local-whisper the warnings name the in-backend fix; on every

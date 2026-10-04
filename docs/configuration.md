@@ -266,10 +266,12 @@ model_path = "~/.local/share/whisrs/models/ggml-base.en.bin"
 # - "window": legacy 8s/2s overlapping sliding window with text-based dedup.
 # - "none": no splitting, no streaming. Nothing is typed while you talk;
 #   when you stop, the whole recording is transcribed in one pass and typed
-#   at once. Use it for long dictation you don't want split into phrases. The wait after stopping
-#   grows with the recording (a few seconds per minute of speech with
-#   large-v3-turbo on a GPU, longer on CPU). It also makes [general]
-#   llm_post_process and [input] paste apply to dictation.
+#   at once. Use it for long dictation you don't want split into phrases.
+#   The wait after stopping grows with the recording (a few seconds per
+#   minute of speech with large-v3-turbo on a GPU, longer on CPU). It also
+#   makes [general] llm_post_process and [input] paste apply to dictation.
+#   A very long recording is still a single decode, not reset per phrase
+#   like "silence".
 # segmentation = "silence"
 # phrase_silence_ms: continuous silence (ms) that ends a phrase in "silence"
 # mode (ignored by "window" and "none"). Lower = snappier output, higher =
