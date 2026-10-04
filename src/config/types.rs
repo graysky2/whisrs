@@ -204,6 +204,10 @@ pub struct GeneralConfig {
     pub silence_timeout_ms: u64,
     #[serde(default = "default_true")]
     pub notify: bool,
+    /// Save finished dictations to `history.jsonl` for `whisrs log`. On by
+    /// default; `false` keeps transcripts off disk entirely.
+    #[serde(default = "default_true")]
+    pub history: bool,
     /// Enable automatic filler word removal from transcriptions.
     #[serde(default)]
     pub remove_filler_words: bool,
@@ -262,6 +266,7 @@ impl Default for GeneralConfig {
             language: default_language(),
             silence_timeout_ms: default_silence_timeout(),
             notify: true,
+            history: true,
             remove_filler_words: false,
             filler_words: Vec::new(),
             audio_feedback: false,
@@ -2936,6 +2941,21 @@ mod tests {
         let serialized = toml::to_string(&config).unwrap();
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert!(reparsed.tts.unwrap().enabled);
+    }
+
+    #[test]
+    fn config_history_defaults_on_and_can_be_disabled() {
+        let config: Config = toml::from_str("[general]\nbackend = \"groq\"\n").unwrap();
+        assert!(config.general.history, "history must stay on by default");
+        assert!(GeneralConfig::default().history);
+
+        let config: Config =
+            toml::from_str("[general]\nbackend = \"groq\"\nhistory = false\n").unwrap();
+        assert!(!config.general.history);
+        assert!(
+            unknown_config_keys("[general]\nbackend = \"groq\"\nhistory = false\n").is_empty(),
+            "history must not be reported as an unknown key"
+        );
     }
 
     #[test]

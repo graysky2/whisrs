@@ -12,6 +12,8 @@ backend = "groq"            # groq | deepgram-streaming | deepgram | openai-real
 language = "en"             # ISO 639-1 or "auto"
 silence_timeout_ms = 2000   # auto-stop after silence (streaming only)
 notify = true               # desktop notifications
+history = true              # save dictations to ~/.local/share/whisrs/history.jsonl for
+                            # `whisrs log`; false keeps transcripts off disk
 remove_filler_words = true  # strip "um", "uh", "you know", etc.
 filler_words = []           # custom list (empty = use built-in defaults)
 audio_feedback = true       # play tones on record start/stop/done
@@ -441,7 +443,8 @@ since both type the model's reply at the cursor.
 - **A multi-line reply is refused when the focused window is a terminal.** There
   a line break is an Enter, which would run a command before you have read it.
   The text is not lost: it goes to the history, so `whisrs log` prints it and you
-  can copy it from there. Ask for a one-liner to get an injected result.
+  can copy it from there. Ask for a one-liner to get an injected result. With
+  `history = false` there is no copy, so the result is discarded.
   You are told when this happens: the "not typed" notification fires even with
   `[general] notify = false`, because that setting means "don't narrate normal
   operation", not "discard my dictation quietly".
