@@ -23,9 +23,9 @@ use xkb_type::ClipboardBackend;
 use crate::context::{DaemonContext, DaemonState};
 use crate::factory::get_model_for_backend;
 use crate::injection::{
-    deliver_streaming_delta, fold_line_breaks, inject_text, is_terminal_class,
-    line_breaks_unsafe_at, notify_copied_for_held_modifier, sanitize_for_injection, Injection,
-    KeystrokeSettings, ModifierWaitTracker, StreamingDelivery,
+    deliver_streaming_delta, fold_line_breaks_at_terminal, inject_text, is_terminal_window,
+    notify_copied_for_held_modifier, sanitize_for_injection, Injection, KeystrokeSettings,
+    ModifierWaitTracker, StreamingDelivery,
 };
 use crate::notify::{send_notification, truncate_preview};
 
@@ -76,10 +76,9 @@ pub(crate) struct StreamingPipelineParams {
     /// `[input] clipboard_only`: copy-only dictation — the transcript is
     /// written to the clipboard and never typed at the cursor.
     pub(crate) clipboard_only: bool,
-    /// The whole `[input]` table, for the line-break guard
-    /// ([`line_breaks_unsafe_at`]), which needs `terminal_classes` and
-    /// `unknown_window_is_terminal`.
-    pub(crate) input: whisrs::InputConfig,
+    /// `[input] terminal_classes`, for folding line breaks in deltas typed
+    /// into a terminal ([`fold_line_breaks_at_terminal`]).
+    pub(crate) terminal_classes: Vec<String>,
 }
 
 /// The streaming pipeline: reads audio in real-time, sends to API, types text.
@@ -106,7 +105,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         keys,
         clipboard_fallback,
         clipboard_only,
-        input,
+        terminal_classes,
     } = params;
     // State-progress toasts are noise when the overlay is on.
     let notify_state = notify && !overlay_enabled;
@@ -155,20 +154,25 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         // Sequenced by the batcher awaiting each sink call, so a plain
         // atomic is enough to carry the flag into the 'static sink futures.
         let focused = Arc::new(AtomicBool::new(false));
-        // Whether the target may be a terminal, resolved once after the
-        // refocus below and reused for every delta (see `line_breaks_unsafe_at`).
-        let fold_breaks = Arc::new(AtomicBool::new(false));
-        let input = Arc::new(input);
+        // Whether the target is a terminal, resolved at most once per session
+        // and only when a delta first holds a line break to fold, so a session
+        // without one never reads the window class (see
+        // `fold_line_breaks_at_terminal`).
+        let at_terminal = Arc::new(std::sync::OnceLock::<bool>::new());
+        let terminal_classes = Arc::new(terminal_classes);
         let full_text =
             run_typing_batcher(text_rx, typing_cancel, filler_filter, move |text_to_type| {
                 let wid = wid.clone();
                 let tracker = Arc::clone(&window_tracker);
                 let focused = Arc::clone(&focused);
-                let fold_breaks = Arc::clone(&fold_breaks);
-                let input = Arc::clone(&input);
+                let at_terminal = Arc::clone(&at_terminal);
+                let terminal_classes = Arc::clone(&terminal_classes);
                 let cancel = Arc::clone(&sink_cancel);
                 let modifier_waits = Arc::clone(&sink_modifier_waits);
                 async move {
+                    // Under `clipboard_only` nothing is typed, so nothing is
+                    // folded, as on the batch path.
+                    let mut text_to_type = text_to_type;
                     if !clipboard_only {
                         // Focus the original window (only once, or re-focus if needed).
                         if !focused.swap(true, Ordering::SeqCst) {
@@ -179,28 +183,33 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
                             }
-                            let class = tracker.get_focused_window_class();
-                            fold_breaks.store(
-                                line_breaks_unsafe_at(class.as_deref(), &input),
-                                Ordering::SeqCst,
-                            );
                         }
-                        let fold_breaks = fold_breaks.load(Ordering::SeqCst);
+
+                        if let Some(folded) =
+                            owned(fold_line_breaks_at_terminal(&text_to_type, || {
+                                *at_terminal.get_or_init(|| {
+                                    is_terminal_window(
+                                        tracker.get_focused_window_class().as_deref(),
+                                        &terminal_classes,
+                                    )
+                                })
+                            }))
+                        {
+                            warn!(
+                                "folded line breaks in dictation: the focused window is a terminal"
+                            );
+                            text_to_type = folded;
+                        }
 
                         // Streaming deliberately bypasses `inject_text` / `[input]
                         // paste`: partial deltas are typed as they arrive, and a
                         // paste per delta would thrash the clipboard. A held
                         // modifier makes the delta wait, uncapped, until it is
                         // released or the session is cancelled (#154).
+                        let delta = text_to_type.clone();
                         match tokio::task::spawn_blocking(move || {
-                            deliver_streaming_delta(
-                                &text_to_type,
-                                fold_breaks,
-                                keys,
-                                &cancel,
-                                &modifier_waits,
-                            )
-                            .map(|delivery| (delivery, text_to_type))
+                            deliver_streaming_delta(&delta, keys, &cancel, &modifier_waits)
+                                .map(|delivery| (delivery, delta))
                         })
                         .await
                         {
@@ -218,6 +227,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                             Err(e) => warn!("failed to join typing task: {e}"),
                         }
                     }
+                    text_to_type
                 }
             })
             .await;
@@ -421,9 +431,13 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
 /// text reaches the cursor.
 ///
 /// Deltas arriving within 150ms of each other are coalesced into one batch so
-/// we don't create a new virtual keyboard per word delta. Returns the full
-/// accumulated (typed) text. Exits when the text channel closes or `cancel`
-/// is set.
+/// we don't create a new virtual keyboard per word delta. Each batch is
+/// sanitized ([`sanitize_for_injection`]) before it reaches the sink. The
+/// sink returns the text it handed on, which can differ from what it was
+/// given (line breaks folded at a terminal), and the batcher returns all of
+/// it accumulated: the transcript the clipboard copy and history get, so they
+/// hold exactly what was typed. Exits when the text channel closes or
+/// `cancel` is set.
 ///
 /// The cancel flag is checked when a delta arrives and again right before a
 /// batch reaches the sink, so a cancelled recording never types the text the
@@ -444,7 +458,7 @@ pub(crate) async fn run_typing_batcher<F, Fut>(
 ) -> String
 where
     F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = ()>,
+    Fut: std::future::Future<Output = String>,
 {
     let mut full_text = String::new();
     let batch_delay = std::time::Duration::from_millis(150);
@@ -477,6 +491,15 @@ where
             }
         }
 
+        // Strip control characters here, not only at the keyboard, so the
+        // clipboard copy and history built from `full_text` get none either.
+        if let Some(sanitized) = owned(sanitize_for_injection(&batch)) {
+            batch = sanitized;
+            if batch.is_empty() {
+                continue;
+            }
+        }
+
         // Add space separator between turns if needed.
         // Don't insert a space before punctuation streaming deltas,
         // as they arrive as bare tokens.
@@ -496,8 +519,8 @@ where
             break;
         }
 
-        full_text.push_str(&text_to_type);
-        sink(text_to_type).await;
+        let handed_on = sink(text_to_type).await;
+        full_text.push_str(&handed_on);
     }
 
     full_text
@@ -1060,29 +1083,40 @@ pub(crate) async fn process_recording_batch(
 
     // Inject the text at the cursor — type keystrokes, or paste via the
     // clipboard when `[input] paste = true` (layout-independent).
-    //
-    // No line break reaches a window that may be a terminal, where it would
-    // be an Enter: a transcript never legitimately holds one, and with
-    // `llm_post_process` a steered model could otherwise add one on every
-    // dictation. Under `clipboard_only` nothing is typed, so nothing is folded.
-    // `outcome.text` takes the sanitized, folded form so history records what
-    // was typed.
-    let class = if clipboard_only {
-        None
+    let terminal_classes = &context.config.input.terminal_classes;
+    let is_terminal = if paste {
+        is_terminal_window(
+            context.window_tracker.get_focused_window_class().as_deref(),
+            terminal_classes,
+        )
     } else {
-        context.window_tracker.get_focused_window_class()
+        false
     };
-    let is_terminal = paste
-        && class
-            .as_deref()
-            .is_some_and(|c| is_terminal_class(c, &context.config.input.terminal_classes));
+
+    // No line break reaches a terminal, where it would be an Enter: a
+    // transcript never legitimately holds one, and with `llm_post_process` a
+    // steered model could otherwise add one on every dictation. The class is
+    // only read for text that has a line break to fold (and reused when
+    // `paste` already read it). Under `clipboard_only` nothing is typed, so
+    // nothing is folded. `outcome.text` takes the sanitized, folded form so
+    // history records what was typed.
     let mut outcome = outcome;
     if let Some(sanitized) = owned(sanitize_for_injection(&outcome.text)) {
         outcome.text = sanitized;
     }
-    if !clipboard_only && line_breaks_unsafe_at(class.as_deref(), &context.config.input) {
-        if let Some(folded) = owned(fold_line_breaks(&outcome.text)) {
-            warn!("folded line breaks in dictation: the focused window may be a terminal");
+    if !clipboard_only {
+        let at_terminal = || {
+            if paste {
+                is_terminal
+            } else {
+                is_terminal_window(
+                    context.window_tracker.get_focused_window_class().as_deref(),
+                    terminal_classes,
+                )
+            }
+        };
+        if let Some(folded) = owned(fold_line_breaks_at_terminal(&outcome.text, at_terminal)) {
+            warn!("folded line breaks in dictation: the focused window is a terminal");
             outcome.text = folded;
         }
     }
@@ -1423,15 +1457,23 @@ mod tests {
         );
     }
 
-    /// Spawn `run_typing_batcher` with a recording sink; returns the text
-    /// channel sender, the cancel flag, the sink log, and the join handle.
-    #[allow(clippy::type_complexity)]
-    fn spawn_test_batcher() -> (
+    /// The text channel sender, the cancel flag, the sink log, and the join
+    /// handle of a test batcher.
+    type TestBatcher = (
         tokio::sync::mpsc::Sender<String>,
         Arc<AtomicBool>,
         Arc<StdMutex<Vec<String>>>,
         tokio::task::JoinHandle<String>,
-    ) {
+    );
+
+    /// Spawn `run_typing_batcher` with a recording sink.
+    fn spawn_test_batcher() -> TestBatcher {
+        spawn_test_batcher_with(str::to_string)
+    }
+
+    /// [`spawn_test_batcher`] with a sink that hands on `deliver(text)`
+    /// instead of `text`, the way the production sink folds line breaks.
+    fn spawn_test_batcher_with(deliver: fn(&str) -> String) -> TestBatcher {
         let (text_tx, text_rx) = tokio::sync::mpsc::channel::<String>(64);
         let cancel = Arc::new(AtomicBool::new(false));
         let typed = Arc::new(StdMutex::new(Vec::<String>::new()));
@@ -1444,12 +1486,34 @@ mod tests {
             move |text| {
                 let sink_log = Arc::clone(&sink_log);
                 async move {
-                    sink_log.lock().unwrap().push(text);
+                    sink_log.lock().unwrap().push(text.clone());
+                    deliver(&text)
                 }
             },
         ));
 
         (text_tx, cancel, typed, batcher)
+    }
+
+    /// The streaming clipboard copy and history are built from what the
+    /// batcher returns, so it must be the text the sink actually typed:
+    /// control characters stripped before the sink sees them, and whatever
+    /// the sink changed (line breaks folded at a terminal) kept.
+    #[tokio::test(start_paused = true)]
+    async fn typing_batcher_returns_the_sanitized_text_the_sink_handed_on() {
+        let (text_tx, _cancel, typed, batcher) = spawn_test_batcher_with(|text| {
+            crate::injection::fold_line_breaks_at_terminal(text, || true).into_owned()
+        });
+
+        text_tx.send("ls\u{1b}\r\nrm x".to_string()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // A batch of nothing but control characters never reaches the sink.
+        text_tx.send("\u{1b}\u{8}".to_string()).await.unwrap();
+        drop(text_tx);
+
+        let full_text = batcher.await.unwrap();
+        assert_eq!(*typed.lock().unwrap(), vec!["ls\nrm x".to_string()]);
+        assert_eq!(full_text, "ls rm x");
     }
 
     /// Issue: `whisrs cancel` during a streaming recording still typed the

@@ -140,8 +140,8 @@ pub(crate) fn sanitize_for_injection(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Replace every run of line breaks with a single space, for dictation headed
-/// to a window where an Enter could submit something (see
-/// [`line_breaks_unsafe_at`]).
+/// to a terminal, where an Enter could submit something (see
+/// [`fold_line_breaks_at_terminal`]).
 ///
 /// Dictation folds rather than refuses, unlike the LLM gate in
 /// [`prepare_llm_injection`]: no spoken phrase produces a line break, so one in
@@ -168,24 +168,30 @@ pub(crate) fn fold_line_breaks(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
-/// Whether a line break typed at the focused window could act as an Enter
-/// that submits something: a known terminal, or a window whose class the
-/// tracker could not report.
+/// Whether the focused window is a known terminal, where a typed line break
+/// is an Enter that runs whatever came before it.
 ///
-/// `class` is `WindowTracker::get_focused_window_class()`. It is `None` on
-/// GNOME and KDE for every window (#72, #127), and on the other desktops when
-/// the query fails. Treating that as "not a terminal" made every line-break
-/// guard a no-op on those two desktops, so unknown counts as a terminal unless
-/// `[input] unknown_window_is_terminal = false`.
+/// `class` is `WindowTracker::get_focused_window_class()`. An unknown class
+/// (`None`) is not a terminal. That is every window on GNOME and KDE (#72,
+/// #127), so the terminal-aware behaviors, the line-break guards included,
+/// are inactive there.
+pub(crate) fn is_terminal_window(class: Option<&str>, terminal_classes: &[String]) -> bool {
+    class.is_some_and(|c| is_terminal_class(c, terminal_classes))
+}
+
+/// [`fold_line_breaks`], applied only when the target is a terminal.
 ///
-/// Only the line-break guards use this. The paste combo, the selection copy
-/// and command mode's line clear still key off [`is_terminal_class`] alone:
-/// a wrong guess there sends Ctrl+A / Ctrl+K into a GUI text field (#70),
-/// while a wrong guess here only withholds or folds a line break.
-pub(crate) fn line_breaks_unsafe_at(class: Option<&str>, input: &whisrs::InputConfig) -> bool {
-    match class.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(c) => is_terminal_class(c, &input.terminal_classes),
-        None => input.unknown_window_is_terminal,
+/// `at_terminal` is asked only when `text` holds a line break, so a dictation
+/// without one never reads the focused window class (a `hyprctl` subprocess
+/// on Hyprland). Expects [`sanitize_for_injection`] to have run first.
+pub(crate) fn fold_line_breaks_at_terminal(
+    text: &str,
+    at_terminal: impl FnOnce() -> bool,
+) -> std::borrow::Cow<'_, str> {
+    if llm::contains_line_break(text) && at_terminal() {
+        fold_line_breaks(text)
+    } else {
+        std::borrow::Cow::Borrowed(text)
     }
 }
 
@@ -342,23 +348,16 @@ pub(crate) enum StreamingDelivery {
 /// `tracker` records the time spent waiting, so the pipeline's drain timeout
 /// after stop does not count it (see [`ModifierWaitTracker`]).
 ///
-/// The delta is sanitized first, and with `fold_breaks` (see
-/// [`line_breaks_unsafe_at`]) its line breaks become spaces, in that order so
-/// a bare `\r` is folded too rather than typed as Return.
+/// The typing batcher has already sanitized the delta (and the pipeline
+/// folded its line breaks at a terminal); it is sanitized again here so no
+/// caller can type a control character by skipping that step.
 pub(crate) fn deliver_streaming_delta(
     delta: &str,
-    fold_breaks: bool,
     keys: KeystrokeSettings,
     cancel: &AtomicBool,
     tracker: &ModifierWaitTracker,
 ) -> Result<StreamingDelivery> {
-    let sanitized = sanitize_for_injection(delta);
-    let delta = if fold_breaks {
-        fold_line_breaks(&sanitized).into_owned()
-    } else {
-        sanitized.into_owned()
-    };
-    let delta = delta.as_str();
+    let delta = &*sanitize_for_injection(delta);
     let wait = with_persistent_keyboard(
         keys,
         || wait_for_physical_modifier_release_until_cancelled(cancel, tracker),
@@ -2580,14 +2579,8 @@ mod tests {
             with_keyboard(keyboard, || {
                 with_modifier_probe(probe, || {
                     delivery = Some(
-                        deliver_streaming_delta(
-                            "hello",
-                            false,
-                            test_keys_waiting(cap),
-                            &cancel,
-                            &tracker,
-                        )
-                        .unwrap(),
+                        deliver_streaming_delta("hello", test_keys_waiting(cap), &cancel, &tracker)
+                            .unwrap(),
                     );
                 });
             });
@@ -2629,8 +2622,7 @@ mod tests {
         with_keyboard(keyboard, || {
             with_modifier_probe(probe, || {
                 delivery = Some(
-                    deliver_streaming_delta("secret", false, test_keys(), &cancel, &tracker)
-                        .unwrap(),
+                    deliver_streaming_delta("secret", test_keys(), &cancel, &tracker).unwrap(),
                 );
             });
         });
@@ -2684,10 +2676,9 @@ mod tests {
                     |text| {
                         // Same thread as the probe: deliver synchronously.
                         let delivery =
-                            deliver_streaming_delta(&text, false, test_keys(), &cancel, &tracker)
-                                .unwrap();
+                            deliver_streaming_delta(&text, test_keys(), &cancel, &tracker).unwrap();
                         assert_eq!(delivery, StreamingDelivery::Typed);
-                        async {}
+                        async move { text }
                     },
                 ));
             });
@@ -2877,41 +2868,37 @@ mod tests {
         assert_eq!(folded, "ls curl x|sh ");
     }
 
-    fn input_with(unknown_window_is_terminal: bool, classes: &[&str]) -> whisrs::InputConfig {
-        whisrs::InputConfig {
-            unknown_window_is_terminal,
-            terminal_classes: user(classes),
-            ..Default::default()
-        }
+    /// An unknown class is not a terminal, so GNOME and KDE (which never
+    /// report one) keep typing line breaks as on every release before this.
+    #[test]
+    fn an_unknown_window_is_not_a_terminal() {
+        let classes = user(&["alacritty-float"]);
+        assert!(!is_terminal_window(None, &classes));
+        assert!(!is_terminal_window(Some(""), &classes));
+        assert!(is_terminal_window(Some("Alacritty"), &classes));
+        assert!(is_terminal_window(Some("alacritty-float"), &classes));
+        assert!(!is_terminal_window(Some("firefox"), &classes));
     }
 
+    /// The terminal check reads the focused window class, a subprocess on
+    /// Hyprland, so it is only made for text that has a line break to fold.
     #[test]
-    fn an_unknown_window_counts_as_a_terminal_by_default() {
-        let input = whisrs::InputConfig::default();
-        assert!(input.unknown_window_is_terminal, "secure default");
-        for class in [None, Some(""), Some("   ")] {
-            assert!(line_breaks_unsafe_at(class, &input), "{class:?}");
-        }
-    }
+    fn the_terminal_check_runs_only_for_text_with_a_line_break() {
+        let asked = std::cell::Cell::new(0);
+        let at_terminal = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert_eq!(
+            fold_line_breaks_at_terminal("one line", at_terminal),
+            "one line"
+        );
+        assert_eq!(asked.get(), 0, "no line break, no class query");
 
-    #[test]
-    fn an_unknown_window_is_not_a_terminal_when_opted_out() {
-        let input = input_with(false, &[]);
-        assert!(!line_breaks_unsafe_at(None, &input));
-        assert!(!line_breaks_unsafe_at(Some(""), &input));
-        // A known terminal is still guarded: the switch is about unknowns.
-        assert!(line_breaks_unsafe_at(Some("kitty"), &input));
-    }
+        assert_eq!(fold_line_breaks_at_terminal("a\nb", at_terminal), "a b");
+        assert_eq!(asked.get(), 1);
 
-    #[test]
-    fn a_known_class_is_judged_by_the_terminal_list() {
-        for unknown in [true, false] {
-            let input = input_with(unknown, &["alacritty-float"]);
-            assert!(line_breaks_unsafe_at(Some("Alacritty"), &input));
-            assert!(line_breaks_unsafe_at(Some("alacritty-float"), &input));
-            assert!(!line_breaks_unsafe_at(Some("firefox"), &input));
-            assert!(!line_breaks_unsafe_at(Some("steam"), &input));
-        }
+        assert_eq!(fold_line_breaks_at_terminal("a\nb", || false), "a\nb");
     }
 
     /// An Escape is not a line break, so the gate alone would let it through
@@ -2974,37 +2961,30 @@ mod tests {
     }
 
     #[test]
-    fn a_streaming_delta_is_sanitized_and_folded_on_request() {
+    fn a_streaming_delta_is_sanitized() {
         let _lock = KEYBOARD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        for (fold, expected) in [(true, "ls curl x "), (false, "ls\ncurl x\n")] {
-            let keyboard = MockKeyboard::default();
-            let typed = Arc::clone(&keyboard.typed);
-            let cancel = AtomicBool::new(false);
-            let tracker = ModifierWaitTracker::default();
-            let mut delivery = None;
-            with_keyboard(keyboard, || {
-                with_modifier_probe(
-                    || false,
-                    || {
-                        delivery = Some(
-                            deliver_streaming_delta(
-                                "ls\r\u{1b}curl x\n",
-                                fold,
-                                test_keys(),
-                                &cancel,
-                                &tracker,
-                            )
-                            .unwrap(),
-                        );
-                    },
-                );
-            });
-            assert_eq!(delivery, Some(StreamingDelivery::Typed));
-            assert_eq!(
-                *typed.lock().unwrap(),
-                vec![expected.to_string()],
-                "fold = {fold}"
+        let keyboard = MockKeyboard::default();
+        let typed = Arc::clone(&keyboard.typed);
+        let cancel = AtomicBool::new(false);
+        let tracker = ModifierWaitTracker::default();
+        let mut delivery = None;
+        with_keyboard(keyboard, || {
+            with_modifier_probe(
+                || false,
+                || {
+                    delivery = Some(
+                        deliver_streaming_delta(
+                            "ls\r\u{1b}curl x\n",
+                            test_keys(),
+                            &cancel,
+                            &tracker,
+                        )
+                        .unwrap(),
+                    );
+                },
             );
-        }
+        });
+        assert_eq!(delivery, Some(StreamingDelivery::Typed));
+        assert_eq!(*typed.lock().unwrap(), vec!["ls\ncurl x\n".to_string()]);
     }
 }
