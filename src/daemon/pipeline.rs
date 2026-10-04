@@ -214,7 +214,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                         .await
                         {
                             Ok(Ok((StreamingDelivery::Typed, text))) => {
-                                info!("typed: {text:?}");
+                                debug!("typed: {text:?}");
                             }
                             Ok(Ok((StreamingDelivery::Cancelled, text))) => {
                                 info!(

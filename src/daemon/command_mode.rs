@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use audio_silence_gate::{AutoStopDetector, SILENCE_RMS_THRESHOLD};
 use whisrs::audio::capture::{AudioCaptureHandle, SAMPLE_RATE};
@@ -384,7 +384,7 @@ async fn command_mode_background_inner(
         return Ok(());
     }
 
-    info!("command mode: instruction = {:?}", instruction);
+    debug!("command mode: instruction = {:?}", instruction);
 
     // Send to LLM.
     let raw = llm::rewrite_text(&cmd_ctx.llm_config, &cmd_ctx.selected_text, &instruction).await?;
