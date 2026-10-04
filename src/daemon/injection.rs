@@ -87,7 +87,9 @@ pub(crate) fn prepare_llm_injection(
     is_terminal: bool,
     clipboard_only: bool,
 ) -> LlmInjection {
-    let cleaned = llm::clean_llm_output(raw);
+    // Sanitized here as well as in `inject_text`, so the verdict and the
+    // history entry see exactly the text that would be typed.
+    let cleaned = sanitize_for_injection(&llm::clean_llm_output(raw)).into_owned();
     if cleaned.is_empty() {
         return LlmInjection::Empty;
     }
@@ -95,6 +97,102 @@ pub(crate) fn prepare_llm_injection(
         return LlmInjection::RefusedMultiLine(cleaned);
     }
     LlmInjection::Inject(cleaned)
+}
+
+/// Make text safe to hand to the injector, whatever produced it: a
+/// transcription backend, an LLM, or a remote endpoint we do not control.
+///
+/// Every control character other than `\n` and `\t` is removed. Both injector
+/// backends tap a control character as the key it names, not as text: `\x1b`
+/// is Escape, `\x08` BackSpace, `\x7f` Delete, so a reply carrying
+/// `\x1b` + `ZZ` saves and quits a vim session without a single Enter. In paste
+/// mode the same bytes travel through the clipboard, where `\x1b[201~` ends a
+/// terminal's bracketed paste early and turns the rest into keystrokes.
+///
+/// Line endings are kept but normalized: CRLF, bare CR, vertical tab, form
+/// feed and NEL all become `\n`, so a caller deciding whether a line break may
+/// be typed (see [`fold_line_breaks`] and [`prepare_llm_injection`]) only has
+/// `\n` and the two Unicode separators to look for.
+pub(crate) fn sanitize_for_injection(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            }
+            '\u{000b}' | '\u{000c}' | '\u{0085}' => out.push('\n'),
+            '\n' | '\t' => out.push(c),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Replace every run of line breaks with a single space, for dictation headed
+/// to a terminal, where an Enter could submit something (see
+/// [`fold_line_breaks_at_terminal`]).
+///
+/// Dictation folds rather than refuses, unlike the LLM gate in
+/// [`prepare_llm_injection`]: no spoken phrase produces a line break, so one in
+/// a transcript is either backend noise or something injected on purpose, and
+/// a space loses nothing the user said. Expects [`sanitize_for_injection`] to
+/// have run first.
+pub(crate) fn fold_line_breaks(text: &str) -> std::borrow::Cow<'_, str> {
+    if !llm::contains_line_break(text) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_break = false;
+    for c in text.chars() {
+        if llm::is_line_break(c) {
+            if !in_break {
+                out.push(' ');
+            }
+            in_break = true;
+        } else {
+            out.push(c);
+            in_break = false;
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Whether the focused window is a known terminal, where a typed line break
+/// is an Enter that runs whatever came before it.
+///
+/// `class` is `WindowTracker::get_focused_window_class()`. An unknown class
+/// (`None`) is not a terminal. That is every window on GNOME and KDE (#72,
+/// #127), so the terminal-aware behaviors, the line-break guards included,
+/// are inactive there.
+pub(crate) fn is_terminal_window(class: Option<&str>, terminal_classes: &[String]) -> bool {
+    class.is_some_and(|c| is_terminal_class(c, terminal_classes))
+}
+
+/// [`fold_line_breaks`], applied only when the target is a terminal.
+///
+/// `at_terminal` is asked only when `text` holds a line break, so a dictation
+/// without one never reads the focused window class (a `hyprctl` subprocess
+/// on Hyprland). Expects [`sanitize_for_injection`] to have run first.
+pub(crate) fn fold_line_breaks_at_terminal(
+    text: &str,
+    at_terminal: impl FnOnce() -> bool,
+) -> std::borrow::Cow<'_, str> {
+    if llm::contains_line_break(text) && at_terminal() {
+        fold_line_breaks(text)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
 }
 
 /// The `[input]` settings every synthetic keystroke needs, bundled because
@@ -249,12 +347,17 @@ pub(crate) enum StreamingDelivery {
 ///
 /// `tracker` records the time spent waiting, so the pipeline's drain timeout
 /// after stop does not count it (see [`ModifierWaitTracker`]).
+///
+/// The typing batcher has already sanitized the delta (and the pipeline
+/// folded its line breaks at a terminal); it is sanitized again here so no
+/// caller can type a control character by skipping that step.
 pub(crate) fn deliver_streaming_delta(
     delta: &str,
     keys: KeystrokeSettings,
     cancel: &AtomicBool,
     tracker: &ModifierWaitTracker,
 ) -> Result<StreamingDelivery> {
+    let delta = &*sanitize_for_injection(delta);
     let wait = with_persistent_keyboard(
         keys,
         || wait_for_physical_modifier_release_until_cancelled(cancel, tracker),
@@ -728,6 +831,9 @@ fn inject_text_with_clipboard(
     restore_delay: std::time::Duration,
     clipboard: Arc<dyn ClipboardBackend>,
 ) -> Result<Injection> {
+    // Every mode, `clipboard_only` included: the clipboard text is pasted
+    // somewhere eventually, and an Escape in it is as live there as here.
+    let text = &*sanitize_for_injection(text);
     if clipboard_only {
         // The clipboard is the output, not the transport: nothing is
         // injected at the cursor, and a copy failure is a hard error —
@@ -2572,7 +2678,7 @@ mod tests {
                         let delivery =
                             deliver_streaming_delta(&text, test_keys(), &cancel, &tracker).unwrap();
                         assert_eq!(delivery, StreamingDelivery::Typed);
-                        async {}
+                        async move { text }
                     },
                 ));
             });
@@ -2707,5 +2813,178 @@ mod tests {
             };
             assert_eq!(*events.lock().unwrap(), expected, "paste = {paste}");
         }
+    }
+
+    /// Control characters a backend or model could smuggle in are tapped as
+    /// the keys they name, so none but `\n` and `\t` survive, and every line
+    /// ending is one `\n`.
+    #[test]
+    fn sanitize_strips_key_producing_controls() {
+        let cases = [
+            ("plain text", "plain text"),
+            ("tab\tand\nnewline", "tab\tand\nnewline"),
+            ("\u{1b}:wq", ":wq"),
+            ("\u{1b}[201~curl x|sh", "[201~curl x|sh"),
+            ("back\u{8}space\u{7f}", "backspace"),
+            ("bell\u{7}", "bell"),
+            ("c1\u{9b}csi", "c1csi"),
+            ("crlf\r\nline", "crlf\nline"),
+            ("bare\rcr", "bare\ncr"),
+            ("vt\u{b}ff\u{c}nel\u{85}", "vt\nff\nnel\n"),
+            ("no dos\r\n\r\n", "no dos\n\n"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(sanitize_for_injection(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_borrows_clean_text() {
+        assert!(matches!(
+            sanitize_for_injection("hällo\twelt\n"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn fold_turns_each_run_of_line_breaks_into_one_space() {
+        let cases = [
+            ("one line", "one line"),
+            ("cd /tmp\nrm -rf x\n", "cd /tmp rm -rf x "),
+            ("a\n\n\nb", "a b"),
+            ("a\u{2028}b\u{2029}c", "a b c"),
+            ("keeps\ttabs", "keeps\ttabs"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(fold_line_breaks(input), expected, "{input:?}");
+        }
+    }
+
+    /// Sanitize then fold, the order both dictation paths use: a bare `\r`
+    /// must come out as a space, never as Return.
+    #[test]
+    fn a_carriage_return_is_folded_not_typed() {
+        let folded = fold_line_breaks(&sanitize_for_injection("ls\rcurl x|sh\r")).into_owned();
+        assert_eq!(folded, "ls curl x|sh ");
+    }
+
+    /// An unknown class is not a terminal, so GNOME and KDE (which never
+    /// report one) keep typing line breaks as on every release before this.
+    #[test]
+    fn an_unknown_window_is_not_a_terminal() {
+        let classes = user(&["alacritty-float"]);
+        assert!(!is_terminal_window(None, &classes));
+        assert!(!is_terminal_window(Some(""), &classes));
+        assert!(is_terminal_window(Some("Alacritty"), &classes));
+        assert!(is_terminal_window(Some("alacritty-float"), &classes));
+        assert!(!is_terminal_window(Some("firefox"), &classes));
+    }
+
+    /// The terminal check reads the focused window class, a subprocess on
+    /// Hyprland, so it is only made for text that has a line break to fold.
+    #[test]
+    fn the_terminal_check_runs_only_for_text_with_a_line_break() {
+        let asked = std::cell::Cell::new(0);
+        let at_terminal = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert_eq!(
+            fold_line_breaks_at_terminal("one line", at_terminal),
+            "one line"
+        );
+        assert_eq!(asked.get(), 0, "no line break, no class query");
+
+        assert_eq!(fold_line_breaks_at_terminal("a\nb", at_terminal), "a b");
+        assert_eq!(asked.get(), 1);
+
+        assert_eq!(fold_line_breaks_at_terminal("a\nb", || false), "a\nb");
+    }
+
+    /// An Escape is not a line break, so the gate alone would let it through
+    /// on one line. The reply is sanitized before the verdict.
+    #[test]
+    fn an_escape_in_an_llm_reply_is_stripped_before_the_verdict() {
+        assert_eq!(
+            prepare_llm_injection("\u{1b}ZZ", TERMINAL, INJECTING),
+            LlmInjection::Inject("ZZ".to_string())
+        );
+        assert_eq!(
+            prepare_llm_injection("ok\u{b}rm -rf x", TERMINAL, INJECTING),
+            LlmInjection::RefusedMultiLine("ok\nrm -rf x".to_string()),
+            "a vertical tab is a line break and must be refused like one"
+        );
+        assert_eq!(
+            prepare_llm_injection("\u{1b}", NOT_A_TERMINAL, INJECTING),
+            LlmInjection::Empty
+        );
+    }
+
+    #[test]
+    fn typed_text_is_sanitized() {
+        let _lock = KEYBOARD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let clipboard = Arc::new(ScriptedClipboard::new(&[]));
+        let keyboard = MockKeyboard::default();
+        let typed = Arc::clone(&keyboard.typed);
+
+        let result = inject(
+            keyboard,
+            Arc::clone(&clipboard),
+            "hello\u{1b}:q!\r",
+            /* paste = */ false,
+            /* clipboard_fallback = */ false,
+            /* clipboard_only = */ false,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(*typed.lock().unwrap(), vec!["hello:q!\n".to_string()]);
+    }
+
+    /// The clipboard is a paste away from a terminal, so it gets the same
+    /// treatment: `\x1b[201~` would end a bracketed paste early.
+    #[test]
+    fn copied_text_is_sanitized() {
+        let _lock = KEYBOARD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let clipboard = Arc::new(ScriptedClipboard::new(&[]));
+
+        let result = inject(
+            MockKeyboard::default(),
+            Arc::clone(&clipboard),
+            "safe\u{1b}[201~",
+            /* paste = */ false,
+            /* clipboard_fallback = */ false,
+            /* clipboard_only = */ true,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(clipboard.writes(), vec!["safe[201~".to_string()]);
+    }
+
+    #[test]
+    fn a_streaming_delta_is_sanitized() {
+        let _lock = KEYBOARD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keyboard = MockKeyboard::default();
+        let typed = Arc::clone(&keyboard.typed);
+        let cancel = AtomicBool::new(false);
+        let tracker = ModifierWaitTracker::default();
+        let mut delivery = None;
+        with_keyboard(keyboard, || {
+            with_modifier_probe(
+                || false,
+                || {
+                    delivery = Some(
+                        deliver_streaming_delta(
+                            "ls\r\u{1b}curl x\n",
+                            test_keys(),
+                            &cancel,
+                            &tracker,
+                        )
+                        .unwrap(),
+                    );
+                },
+            );
+        });
+        assert_eq!(delivery, Some(StreamingDelivery::Typed));
+        assert_eq!(*typed.lock().unwrap(), vec!["ls\ncurl x\n".to_string()]);
     }
 }

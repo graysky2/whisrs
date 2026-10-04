@@ -465,6 +465,13 @@ which today means Hyprland, Niri, Sway and X11. On KDE and GNOME a terminal is
 treated as an ordinary target, so a multi-line reply is typed there. Add any
 class the built-in list misses to `[input] terminal_classes`.
 
+Dictation follows the same rule with a gentler outcome. If a transcript or an
+`llm_post_process` rewrite contains a line break and the focused window is a
+terminal, each run of line breaks becomes a single space, whether the text is
+typed or pasted. A `clipboard_only` copy keeps its line breaks. This uses the
+same terminal detection, so it does not fire on KDE and GNOME. Control characters such as Escape and Backspace are removed from
+everything whisrs types, pastes or copies, wherever it is going.
+
 ## Choosing the microphone
 
 `[audio] device` picks the input whisrs records from:
