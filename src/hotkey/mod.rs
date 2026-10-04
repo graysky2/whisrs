@@ -512,6 +512,19 @@ mod tests {
         assert!(modifiers_held(&held, &[Key::KEY_LEFTCTRL]));
     }
 
+    #[test]
+    fn bare_binding_requires_no_modifier_held() {
+        // A bare binding ("ScrollLock") fires only when no modifier is held,
+        // so it stays distinct from "Shift+ScrollLock".
+        let held: HashSet<Key> = HashSet::from([Key::KEY_SCROLLLOCK]);
+        assert!(modifiers_held(&held, &[]));
+
+        for m in [Key::KEY_LEFTSHIFT, Key::KEY_RIGHTCTRL, Key::KEY_LEFTMETA] {
+            let held: HashSet<Key> = HashSet::from([m, Key::KEY_SCROLLLOCK]);
+            assert!(!modifiers_held(&held, &[]), "{m:?} held must not match");
+        }
+    }
+
     fn all_hotkeys_set() -> HotkeyConfig {
         HotkeyConfig {
             toggle: Some("Super+Shift+W".to_string()),
