@@ -360,10 +360,14 @@ response_format = "wav"     # audio format requested from the API
 
 # Built-in global hotkeys (optional, works without WM keybinds)
 # Triggers: A-Z, 0-9, F1-F24, space, enter, escape, tab, backspace, delete,
-#   insert, home, end, pageup, pagedown, up, down, left, right.
-# Modifiers: Super, Alt, Ctrl, Shift. At least one is required, so a bare
-#   "F13" is rejected; write "Shift+F13". The modifier set must match exactly,
-#   so "Ctrl+Alt+Ins" does not fire while Shift is also held.
+#   insert, home, end, pageup, pagedown, up, down, left, right, scrolllock,
+#   pause.
+# Modifiers: Super, Alt, Ctrl, Shift. At least one is required, except for
+#   ScrollLock, Pause and F13-F24, which can be bound alone ("ScrollLock").
+#   A bare binding fires only when no modifier is held. The modifier set must
+#   match exactly, so "Ctrl+Alt+Ins" does not fire while Shift is also held.
+#   Keys are not grabbed: the press still reaches the system, so ScrollLock
+#   still toggles its LED.
 # Two bindings sharing a combo both fire on one press, so whisrs warns at
 #   startup when it finds a duplicate across [hotkeys] and [[llm_commands]].
 [hotkeys]
@@ -470,6 +474,13 @@ Terminal detection needs the compositor to report the focused window class,
 which today means Hyprland, Niri, Sway and X11. On KDE and GNOME a terminal is
 treated as an ordinary target, so a multi-line reply is typed there. Add any
 class the built-in list misses to `[input] terminal_classes`.
+
+Dictation follows the same rule with a gentler outcome. If a transcript or an
+`llm_post_process` rewrite contains a line break and the focused window is a
+terminal, each run of line breaks becomes a single space, whether the text is
+typed or pasted. A `clipboard_only` copy keeps its line breaks. This uses the
+same terminal detection, so it does not fire on KDE and GNOME. Control characters such as Escape and Backspace are removed from
+everything whisrs types, pastes or copies, wherever it is going.
 
 ## Choosing the microphone
 
