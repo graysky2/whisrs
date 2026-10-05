@@ -562,6 +562,11 @@ pub struct LocalWhisperConfig {
     /// segmentation mode.
     #[serde(default = "default_phrase_silence_ms")]
     pub phrase_silence_ms: u64,
+    /// Turn on whisper.cpp flash attention when the model loads. Off by
+    /// default: it only helps on some GPU builds and can change output
+    /// slightly.
+    #[serde(default)]
+    pub flash_attn: bool,
 }
 
 impl LocalWhisperConfig {
@@ -571,6 +576,7 @@ impl LocalWhisperConfig {
             model_path,
             segmentation: default_local_whisper_segmentation(),
             phrase_silence_ms: default_phrase_silence_ms(),
+            flash_attn: false,
         }
     }
 
@@ -2521,6 +2527,8 @@ mod tests {
         assert_eq!(from_serde.model_path, from_default.model_path);
         assert_eq!(from_serde.segmentation, from_default.segmentation);
         assert_eq!(from_serde.phrase_silence_ms, from_default.phrase_silence_ms);
+        assert_eq!(from_serde.flash_attn, from_default.flash_attn);
+        assert!(!from_default.flash_attn);
     }
 
     #[test]

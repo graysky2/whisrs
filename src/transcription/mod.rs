@@ -15,6 +15,9 @@ pub mod local_whisper {
         pub fn new(_model_path: String) -> Self {
             Self
         }
+        pub fn with_flash_attn(_model_path: String, _flash_attn: bool) -> Self {
+            Self
+        }
         pub fn with_segmentation(self, _mode: &str, _phrase_silence_ms: u64) -> Self {
             self
         }

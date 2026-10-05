@@ -277,6 +277,11 @@ model_path = "~/.local/share/whisrs/models/ggml-base.en.bin"
 # mode (ignored by "window" and "none"). Lower = snappier output, higher =
 # fewer mid-sentence splits.
 # phrase_silence_ms = 400
+# flash_attn: enable whisper.cpp flash attention (default false). It can cut
+# decode time on GPU builds (cuda), most on long recordings, and may change
+# the output slightly. Little to gain on CPU. Takes effect when the daemon
+# loads the model, so restart it after changing this.
+# flash_attn = false
 
 # Generic local ASR sidecar — talks to a small HTTP service that hosts the
 # model (Moonshine, NVIDIA Parakeet, Microsoft VibeVoice-ASR, …). Keeps
