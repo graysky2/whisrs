@@ -49,10 +49,11 @@ overlay = false             # on-screen recording overlay (Hyprland/Sway, GNOME 
 # backends, which are deepgram-streaming, openai-realtime,
 # openai-compatible-realtime AND local-whisper, type text as it arrives, so
 # there is never a whole transcript to post-process and the flag does nothing
-# at all. local-whisper is the one to watch: it runs offline and transcribes
-# in a single call, but dictation with it always streams, so llm_post_process
-# is a silent no-op there too. `whisrsd` warns at startup if you pair the two.
-# Use an [[llm_commands]] hotkey instead, which works whatever the backend.
+# at all. local-whisper is the one to watch: it runs offline, but dictation
+# with it streams by default, so llm_post_process is a silent no-op there too.
+# Set [local-whisper] segmentation = "none" to make it a batch backend.
+# `whisrsd` warns at startup if you pair a streaming backend with this flag.
+# Or use an [[llm_commands]] hotkey instead, which works whatever the backend.
 #
 # If the LLM call fails, times out (30s), or returns nothing, the raw
 # transcript is typed instead, so a dictation is never lost to post-processing.
@@ -138,8 +139,8 @@ modifier_wait_ms = 10000
 # LLM result with a single injection call, so it honors this whatever the
 # backend).
 # The streaming dictation path is the exception: streaming backends (including
-# local-whisper, which always streams regardless of its `segmentation` mode)
-# type incrementally and ignore it. `whisrsd` warns at startup if paste is set
+# local-whisper, unless its `segmentation` is "none") type incrementally and
+# ignore it. `whisrsd` warns at startup if paste is set
 # with one of those backends.
 paste = false
 # Leave the final transcript in the system clipboard in addition to
@@ -271,9 +272,18 @@ model_path = "~/.local/share/whisrs/models/ggml-base.en.bin"
 #   text. Continuous speech is force-split at the first silent moment after
 #   20 s (hard ceiling 28 s) so it still emits.
 # - "window": legacy 8s/2s overlapping sliding window with text-based dedup.
+# - "none": no splitting, no streaming. Nothing is typed while you talk;
+#   when you stop, the whole recording is transcribed in one pass and typed
+#   at once. Use it for long dictation you don't want split into phrases.
+#   The wait after stopping grows with the recording (a few seconds per
+#   minute of speech with large-v3-turbo on a GPU, longer on CPU). It also
+#   makes [general] llm_post_process and [input] paste apply to dictation.
+#   A very long recording is still a single decode, not reset per phrase
+#   like "silence".
 # segmentation = "silence"
 # phrase_silence_ms: continuous silence (ms) that ends a phrase in "silence"
-# mode. Lower = snappier output, higher = fewer mid-sentence splits.
+# mode (ignored by "window" and "none"). Lower = snappier output, higher =
+# fewer mid-sentence splits.
 # phrase_silence_ms = 400
 
 # Generic local ASR sidecar — talks to a small HTTP service that hosts the
@@ -358,10 +368,14 @@ response_format = "wav"     # audio format requested from the API
 
 # Built-in global hotkeys (optional, works without WM keybinds)
 # Triggers: A-Z, 0-9, F1-F24, space, enter, escape, tab, backspace, delete,
-#   insert, home, end, pageup, pagedown, up, down, left, right.
-# Modifiers: Super, Alt, Ctrl, Shift. At least one is required, so a bare
-#   "F13" is rejected; write "Shift+F13". The modifier set must match exactly,
-#   so "Ctrl+Alt+Ins" does not fire while Shift is also held.
+#   insert, home, end, pageup, pagedown, up, down, left, right, scrolllock,
+#   pause.
+# Modifiers: Super, Alt, Ctrl, Shift. At least one is required, except for
+#   ScrollLock, Pause and F13-F24, which can be bound alone ("ScrollLock").
+#   A bare binding fires only when no modifier is held. The modifier set must
+#   match exactly, so "Ctrl+Alt+Ins" does not fire while Shift is also held.
+#   Keys are not grabbed: the press still reaches the system, so ScrollLock
+#   still toggles its LED.
 # Two bindings sharing a combo both fire on one press, so whisrs warns at
 #   startup when it finds a duplicate across [hotkeys] and [[llm_commands]].
 [hotkeys]
@@ -468,6 +482,13 @@ Terminal detection needs the compositor to report the focused window class,
 which today means Hyprland, Niri, Sway and X11. On KDE and GNOME a terminal is
 treated as an ordinary target, so a multi-line reply is typed there. Add any
 class the built-in list misses to `[input] terminal_classes`.
+
+Dictation follows the same rule with a gentler outcome. If a transcript or an
+`llm_post_process` rewrite contains a line break and the focused window is a
+terminal, each run of line breaks becomes a single space, whether the text is
+typed or pasted. A `clipboard_only` copy keeps its line breaks. This uses the
+same terminal detection, so it does not fire on KDE and GNOME. Control characters such as Escape and Backspace are removed from
+everything whisrs types, pastes or copies, wherever it is going.
 
 ## Choosing the microphone
 
