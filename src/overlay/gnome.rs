@@ -59,6 +59,12 @@ pub(super) async fn run_gnome_broadcaster(
                     break;
                 }
                 let state = *state_rx.borrow();
+                // GNOME re-enables the extension on unlock with its defaults,
+                // and it may start after us, so a one-shot theme/position at
+                // startup is lost. Re-send both ahead of every state change;
+                // the pill is hidden while idle, so it is placed before it shows.
+                emit_gnome_theme(&conn, &advertised_theme).await?;
+                emit_gnome_position(&conn, position).await?;
                 emit_gnome_state(&conn, state).await?;
             }
             _ = level_interval.tick() => {

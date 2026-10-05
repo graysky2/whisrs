@@ -77,7 +77,10 @@ height = 40                 # 36..=48 (clamped)
 # Where the pill sits: "bottom-center" (default) | "bottom-left" |
 # "bottom-right" | "top-left" | "top-center" | "top-right".
 # "-middle" works as a synonym for "-center". 16 px from the screen edges.
-# On GNOME this needs the updated Shell extension from this release.
+# On GNOME this needs the Shell extension from this release. An older
+# one ignores the key and stays at the bottom center, and `whisrs setup`
+# does not replace an installed extension, so update it by hand
+# (contrib/gnome-shell-extension/README.md) and log out and back in.
 position = "bottom-center"
 
 # When theme = "custom", these override the named theme. Hex strings:
