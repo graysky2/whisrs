@@ -112,6 +112,7 @@ pub(crate) async fn handle_toggle(
                     silence_timeout_ms: context.config.general.silence_timeout_ms,
                     filler_enabled: context.config.general.remove_filler_words,
                     filler_words: context.config.general.filler_words.clone(),
+                    replacements: context.config.replacements.clone(),
                     audio_feedback: context.config.general.audio_feedback,
                     audio_feedback_volume: context.config.general.audio_feedback_volume,
                     backend_name: context.config.general.backend.clone(),

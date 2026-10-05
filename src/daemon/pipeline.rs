@@ -14,6 +14,7 @@ use whisrs::audio::capture::{AudioCaptureHandle, SAMPLE_RATE};
 use whisrs::audio::feedback;
 use whisrs::history::{self, HistoryEntry};
 use whisrs::llm;
+use whisrs::replacements::Replacer;
 use whisrs::state::Action;
 use whisrs::transcription::{TranscriptionBackend, TranscriptionConfig};
 use whisrs::window::WindowTracker;
@@ -65,6 +66,8 @@ pub(crate) struct StreamingPipelineParams {
     pub(crate) silence_timeout_ms: u64,
     pub(crate) filler_enabled: bool,
     pub(crate) filler_words: Vec<String>,
+    /// `[replacements]`, applied to each batch after filler removal.
+    pub(crate) replacements: std::collections::BTreeMap<String, String>,
     pub(crate) audio_feedback: bool,
     pub(crate) audio_feedback_volume: f32,
     pub(crate) backend_name: String,
@@ -99,6 +102,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         silence_timeout_ms,
         filler_enabled,
         filler_words,
+        replacements,
         audio_feedback,
         audio_feedback_volume,
         backend_name,
@@ -124,6 +128,8 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
     } else {
         None
     };
+    let replacer =
+        Replacer::new(&replacements).context("invalid [replacements] key in configuration")?;
 
     // Spawn the transcription backend.
     let config_clone = config.clone();
@@ -160,8 +166,12 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         // `fold_line_breaks_at_terminal`).
         let at_terminal = Arc::new(std::sync::OnceLock::<bool>::new());
         let terminal_classes = Arc::new(terminal_classes);
-        let full_text =
-            run_typing_batcher(text_rx, typing_cancel, filler_filter, move |text_to_type| {
+        let full_text = run_typing_batcher(
+            text_rx,
+            typing_cancel,
+            filler_filter,
+            replacer,
+            move |text_to_type| {
                 let wid = wid.clone();
                 let tracker = Arc::clone(&window_tracker);
                 let focused = Arc::clone(&focused);
@@ -229,8 +239,9 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                     }
                     text_to_type
                 }
-            })
-            .await;
+            },
+        )
+        .await;
 
         write_streaming_clipboard(
             &full_text,
@@ -454,6 +465,7 @@ pub(crate) async fn run_typing_batcher<F, Fut>(
     mut text_rx: tokio::sync::mpsc::Receiver<String>,
     cancel: Arc<AtomicBool>,
     filler_filter: Option<FillerFilter>,
+    replacer: Option<Replacer>,
     mut sink: F,
 ) -> String
 where
@@ -486,6 +498,15 @@ where
         // Apply filler word removal if enabled.
         if let Some(filter) = filler_filter.as_ref() {
             batch = filter.apply(&batch);
+            if batch.is_empty() {
+                continue;
+            }
+        }
+
+        // Apply `[replacements]`. Per batch, so a phrase split across two
+        // batches is not matched.
+        if let Some(replacer) = replacer.as_ref() {
+            batch = replacer.apply(&batch);
             if batch.is_empty() {
                 continue;
             }
@@ -640,6 +661,8 @@ pub(crate) struct BatchOptions<'a> {
     pub(crate) check_prompt_echo: bool,
     /// Apply the configured filler-word filter. Dictation only for now.
     pub(crate) apply_filler: bool,
+    /// Apply `[replacements]`. Dictation only, like `apply_filler`.
+    pub(crate) apply_replacements: bool,
     /// Which flow is asking; picks the notification/log wording.
     pub(crate) origin: BatchOrigin<'a>,
 }
@@ -653,6 +676,7 @@ impl<'a> BatchOptions<'a> {
             save_recovery: true,
             check_prompt_echo: true,
             apply_filler: true,
+            apply_replacements: true,
             origin: BatchOrigin::Dictation,
         }
     }
@@ -666,6 +690,7 @@ impl<'a> BatchOptions<'a> {
             save_recovery: false,
             check_prompt_echo: false,
             apply_filler: false,
+            apply_replacements: false,
             origin: BatchOrigin::CommandMode,
         }
     }
@@ -681,6 +706,7 @@ impl<'a> BatchOptions<'a> {
             save_recovery: false,
             check_prompt_echo: true,
             apply_filler: false,
+            apply_replacements: false,
             origin: BatchOrigin::LlmCommand { name },
         }
     }
@@ -846,6 +872,17 @@ pub(crate) async fn transcribe_batch_audio(
             );
         }
         cleaned
+    } else {
+        text
+    };
+
+    let text = if opts.apply_replacements {
+        match Replacer::new(&context.config.replacements)
+            .context("invalid [replacements] key in configuration")?
+        {
+            Some(replacer) => replacer.apply(&text),
+            None => text,
+        }
     } else {
         text
     };
@@ -1483,6 +1520,7 @@ mod tests {
             text_rx,
             Arc::clone(&cancel),
             None,
+            None,
             move |text| {
                 let sink_log = Arc::clone(&sink_log);
                 async move {
@@ -1563,6 +1601,28 @@ mod tests {
         assert!(typed.lock().unwrap().is_empty());
     }
 
+    /// `[replacements]` reach the streaming path: the sink, and so the
+    /// clipboard copy and history, get the replaced text.
+    #[tokio::test]
+    async fn typing_batcher_applies_replacements() {
+        let (text_tx, text_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let table = [("package build".to_string(), "PKGBUILD".to_string())].into();
+        let replacer = Replacer::new(&table).unwrap();
+        let batcher = tokio::spawn(run_typing_batcher(
+            text_rx,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            replacer,
+            |text| async move { text },
+        ));
+        text_tx
+            .send("edit the Package Build file".to_string())
+            .await
+            .unwrap();
+        drop(text_tx);
+        assert_eq!(batcher.await.unwrap(), "edit the PKGBUILD file");
+    }
+
     // ── BatchOptions / BatchOrigin decision logic ───────────────────────
 
     /// Pins the exact option set each production caller uses (dictation in
@@ -1580,6 +1640,7 @@ mod tests {
                     save_recovery: true,
                     check_prompt_echo: true,
                     apply_filler: true,
+                    apply_replacements: true,
                     origin: BatchOrigin::Dictation,
                 },
             ),
@@ -1591,6 +1652,7 @@ mod tests {
                     save_recovery: false,
                     check_prompt_echo: false,
                     apply_filler: false,
+                    apply_replacements: false,
                     origin: BatchOrigin::CommandMode,
                 },
             ),
@@ -1602,6 +1664,7 @@ mod tests {
                     save_recovery: false,
                     check_prompt_echo: true,
                     apply_filler: false,
+                    apply_replacements: false,
                     origin: BatchOrigin::LlmCommand { name: "proofread" },
                 },
             ),

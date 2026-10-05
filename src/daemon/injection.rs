@@ -2673,6 +2673,7 @@ mod tests {
                     text_rx,
                     Arc::clone(&cancel),
                     None,
+                    None,
                     |text| {
                         // Same thread as the probe: deliver synchronously.
                         let delivery =

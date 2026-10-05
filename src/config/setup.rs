@@ -378,6 +378,7 @@ pub fn run_setup() -> Result<()> {
         hooks: None,
         overlay: if overlay { overlay_config } else { None },
         llm_commands: Vec::new(),
+        replacements: Default::default(),
     };
 
     let config_path = write_config(&config)?;

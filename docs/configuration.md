@@ -530,6 +530,36 @@ keeps its comments and config.toml keeps its terms. Only
 `vocabulary` gets this treatment; `prompt` and everything else stay in
 `config.toml`.
 
+## Word replacements
+
+`vocabulary` only hints the model. When it still mis-hears a term the same way
+every time, map the wrong text to the right one:
+
+```toml
+[replacements]
+"package build" = "PKGBUILD"
+"whisper s" = "whisrs"
+```
+
+Every dictation is rewritten before it is typed, copied or logged. Keys match
+ignoring case, on whole words, with any spaces or hyphens between the words, so
+"Package-build" matches too. Surrounding punctuation is kept ("package build."
+becomes "PKGBUILD."). Values are inserted exactly as written. Where keys
+overlap the longest one wins, and a replacement is never itself replaced
+again. An empty value deletes the match and the spaces after it, so
+`"um" = ""` removes "um" without leaving a double space. Command mode and
+`[[llm_commands]]` instructions are left alone. With `llm_post_process` on,
+replacements run first, so the LLM sees the corrected text (and can still
+rewrite it).
+
+On streaming backends the text is rewritten one typed chunk at a time. With
+`local-whisper` phrase segmentation a chunk is a whole phrase, so this only
+misses if you pause in the middle of a key. Token-streaming backends
+(`openai-realtime`, `deepgram-streaming`) can split a multi-word key across
+two chunks, in which case it does not match. They can also end a chunk in
+the middle of a word, so a key like "pack" can match the first half of
+"package". Batch backends see the whole transcript and are not affected.
+
 ## Environment variables
 
 The following variables override the matching `api_key` in `config.toml`:
