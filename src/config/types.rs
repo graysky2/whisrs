@@ -97,7 +97,7 @@ pub struct HooksConfig {
     pub on_record_stop: Option<String>,
 }
 
-/// Visual configuration for the bottom recording overlay.
+/// Visual configuration for the recording overlay.
 ///
 /// The shape is intentionally clamped tight (90–120 × 36–48) to keep the
 /// gaussian-tapered bar layout legible. Themes pick the colors; if `colors`
@@ -114,6 +114,12 @@ pub struct OverlayConfig {
     /// Pill height in pixels (clamped to 36..=48).
     #[serde(default = "default_overlay_height")]
     pub height: u32,
+    /// Screen corner or edge the pill sits at: `"bottom-center"` (default),
+    /// `"bottom-left"`, `"bottom-right"`, `"top-left"`, `"top-center"` or
+    /// `"top-right"`. `-middle` is accepted for `-center`. Unknown values
+    /// fall back to `"bottom-center"`; [`Config::validate`] warns.
+    #[serde(default = "default_overlay_position")]
+    pub position: String,
     /// Custom color overrides; honored when `theme = "custom"`.
     /// Hex strings: `#RGB`, `#RRGGBB`, or `#RRGGBBAA`.
     #[serde(default)]
@@ -140,6 +146,69 @@ fn default_overlay_width() -> u32 {
 fn default_overlay_height() -> u32 {
     40
 }
+fn default_overlay_position() -> String {
+    "bottom-center".to_string()
+}
+
+/// Where the overlay pill is placed on screen. See [`OverlayConfig::position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverlayPosition {
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+    TopLeft,
+    TopCenter,
+    TopRight,
+}
+
+/// Horizontal placement of the overlay pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayHAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl OverlayPosition {
+    /// Parse a config string (trimmed, case-insensitive). `None` if unknown.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "bottom-left" => Self::BottomLeft,
+            "bottom-center" | "bottom-middle" => Self::BottomCenter,
+            "bottom-right" => Self::BottomRight,
+            "top-left" => Self::TopLeft,
+            "top-center" | "top-middle" => Self::TopCenter,
+            "top-right" => Self::TopRight,
+            _ => return None,
+        })
+    }
+
+    /// Canonical config spelling, also sent to the GNOME extension.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BottomLeft => "bottom-left",
+            Self::BottomCenter => "bottom-center",
+            Self::BottomRight => "bottom-right",
+            Self::TopLeft => "top-left",
+            Self::TopCenter => "top-center",
+            Self::TopRight => "top-right",
+        }
+    }
+
+    /// Whether the pill sits at the top edge (and grows down from it).
+    pub fn is_top(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopCenter | Self::TopRight)
+    }
+
+    pub fn h_align(self) -> OverlayHAlign {
+        match self {
+            Self::BottomLeft | Self::TopLeft => OverlayHAlign::Left,
+            Self::BottomCenter | Self::TopCenter => OverlayHAlign::Center,
+            Self::BottomRight | Self::TopRight => OverlayHAlign::Right,
+        }
+    }
+}
 
 impl Default for OverlayConfig {
     fn default() -> Self {
@@ -147,6 +216,7 @@ impl Default for OverlayConfig {
             theme: default_overlay_theme(),
             width: default_overlay_width(),
             height: default_overlay_height(),
+            position: default_overlay_position(),
             colors: None,
         }
     }
@@ -160,6 +230,10 @@ impl OverlayConfig {
     }
     pub fn clamped_height(&self) -> u32 {
         self.height.clamp(36, 48)
+    }
+    /// Parsed [`Self::position`]; unknown values fall back to the default.
+    pub fn position(&self) -> OverlayPosition {
+        OverlayPosition::parse(&self.position).unwrap_or_default()
     }
 }
 
@@ -204,6 +278,12 @@ pub struct GeneralConfig {
     pub silence_timeout_ms: u64,
     #[serde(default = "default_true")]
     pub notify: bool,
+    /// Save finished dictations to `history.jsonl` for `whisrs log`. On by
+    /// default. `false` stops new writes only: existing entries stay until
+    /// `whisrs log --clear`, and the journal still records streaming
+    /// dictations at the default log level.
+    #[serde(default = "default_true")]
+    pub history: bool,
     /// Enable automatic filler word removal from transcriptions.
     #[serde(default)]
     pub remove_filler_words: bool,
@@ -228,7 +308,7 @@ pub struct GeneralConfig {
     /// Enable system tray icon.
     #[serde(default = "default_true")]
     pub tray: bool,
-    /// Enable bottom-screen recording overlay.
+    /// Enable the on-screen recording overlay.
     #[serde(default)]
     pub overlay: bool,
     /// Run every finished dictation through the shared `[llm]` backend, using
@@ -262,6 +342,7 @@ impl Default for GeneralConfig {
             language: default_language(),
             silence_timeout_ms: default_silence_timeout(),
             notify: true,
+            history: true,
             remove_filler_words: false,
             filler_words: Vec::new(),
             audio_feedback: false,
@@ -358,9 +439,9 @@ pub struct InputConfig {
     /// dictation and command-mode output (`whisrs command` injects its LLM
     /// result with a single injection call, so it honors this regardless of
     /// the configured backend). The streaming *dictation* path is the
-    /// exception: streaming backends (including `local-whisper`, which always
-    /// streams regardless of its `segmentation` mode) type incrementally as
-    /// text arrives and ignore this setting. [`Config::validate`] warns when
+    /// exception: streaming backends (including `local-whisper`, unless its
+    /// `segmentation` is `"none"`) type incrementally as text arrives and
+    /// ignore this setting. [`Config::validate`] warns when
     /// this is set alongside one of those backends.
     #[serde(default)]
     pub paste: bool,
@@ -553,7 +634,9 @@ pub struct LocalWhisperConfig {
     pub model_path: String,
     /// Streaming segmentation strategy: `"silence"` (default) splits audio
     /// into phrases at natural pauses and decodes each exactly once;
-    /// `"window"` is the legacy overlapping sliding window with text dedup.
+    /// `"window"` is the legacy overlapping sliding window with text dedup;
+    /// `"none"` turns streaming off, so nothing is typed until recording
+    /// stops and the whole recording is decoded at once.
     #[serde(default = "default_local_whisper_segmentation")]
     pub segmentation: String,
     /// Milliseconds of continuous silence that ends a phrase in `"silence"`
@@ -570,6 +653,16 @@ impl LocalWhisperConfig {
             segmentation: default_local_whisper_segmentation(),
             phrase_silence_ms: default_phrase_silence_ms(),
         }
+    }
+
+    /// Whether `segmentation` is `"none"`, in which case dictation with
+    /// local-whisper does not stream and takes the batch path.
+    ///
+    /// Matches `SegmentationMode::parse` in the backend (trimmed,
+    /// case-insensitive). That type is not reachable from here: the module
+    /// is replaced by a stub when the `local-whisper` feature is off.
+    pub fn is_unsegmented(&self) -> bool {
+        self.segmentation.trim().eq_ignore_ascii_case("none")
     }
 }
 
@@ -1612,6 +1705,19 @@ impl Config {
             _ => {}
         }
 
+        if let Some(overlay) = &self.overlay {
+            if OverlayPosition::parse(&overlay.position).is_none() {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[overlay] position = {:?} is not a known position, using \
+                         \"bottom-center\". Use one of: bottom-left, bottom-center, \
+                         bottom-right, top-left, top-center, top-right.",
+                        overlay.position
+                    ),
+                });
+            }
+        }
+
         if self.general.silence_timeout_ms == 0 {
             warnings.push(ConfigWarning {
                 message: "silence_timeout_ms is 0 — auto-stop is effectively disabled".to_string(),
@@ -1621,8 +1727,8 @@ impl Config {
         warnings.extend(self.deepgram_keyterm_warnings(backend));
         warnings.extend(self.inert_prompt_warnings(backend));
 
-        // Streaming backends (including local-whisper, which always streams
-        // regardless of its `segmentation` mode) type dictated text
+        // Streaming backends (including local-whisper, unless its
+        // `segmentation` is "none") type dictated text
         // incrementally as it arrives and never go through the
         // paste-injection path, so `[input] paste` does not apply to
         // dictation with them. Command mode is unaffected whatever backend
@@ -1635,16 +1741,7 @@ impl Config {
         // but their `transcribe()` bails with "not yet implemented", so
         // recommending them would trade a no-op flag for broken dictation.
         // Keep them out of every recommendation here until they are real.
-        if self.input.paste
-            && matches!(
-                backend,
-                "deepgram-streaming"
-                    | "openai-realtime"
-                    | "openai-compatible-realtime"
-                    | "local-whisper"
-                    | "local"
-            )
-        {
+        if self.input.paste && self.dictation_streams(backend) {
             warnings.push(ConfigWarning {
                 message: format!(
                     "[input] paste = true does not apply to dictation with backend = \
@@ -1653,7 +1750,8 @@ impl Config {
                      arrives and never use the paste path. Command mode output is injected in \
                      one shot, so it still uses paste where that mode is configured. Switch to \
                      a non-streaming backend (deepgram, groq, openai, asr-sidecar) to use \
-                     paste injection for dictation too."
+                     paste injection for dictation too.{}",
+                    Self::local_whisper_batch_hint(backend)
                 ),
             });
         }
@@ -1713,16 +1811,10 @@ impl Config {
             // never a whole transcript to post-process. local-whisper belongs
             // here even though its `transcribe()` is a real batch path (which
             // is why the llm_commands warning below excludes it) — dictation
-            // with it always streams. Unlike llm_commands there is no degraded
-            // mode: the flag does nothing at all.
-            if matches!(
-                backend,
-                "deepgram-streaming"
-                    | "openai-realtime"
-                    | "openai-compatible-realtime"
-                    | "local-whisper"
-                    | "local"
-            ) {
+            // with it streams unless `segmentation = "none"`. Unlike
+            // llm_commands there is no degraded mode: the flag does nothing
+            // at all.
+            if self.dictation_streams(backend) {
                 warnings.push(ConfigWarning {
                     message: format!(
                         "[general] llm_post_process = true does not apply to dictation with \
@@ -1732,7 +1824,8 @@ impl Config {
                          post-process. Nothing runs — dictation is typed unmodified. Switch to \
                          a non-streaming backend (deepgram, groq, openai, asr-sidecar) to \
                          post-process dictation, or use an [[llm_commands]] hotkey, which \
-                         works whatever the backend."
+                         works whatever the backend.{}",
+                        Self::local_whisper_batch_hint(backend)
                     ),
                 });
             }
@@ -1931,6 +2024,37 @@ impl Config {
             .as_ref()
             .map(|o| o.model.clone())
             .unwrap_or_else(|| "gpt-realtime-whisper".to_string())
+    }
+
+    /// Whether dictation with `backend` takes the streaming path, which
+    /// ignores `[input] paste` and `[general] llm_post_process`.
+    ///
+    /// local-whisper streams unless `[local-whisper] segmentation = "none"`;
+    /// a missing section means the default, `"silence"`, which streams.
+    fn dictation_streams(&self, backend: &str) -> bool {
+        match backend {
+            "deepgram-streaming" | "openai-realtime" | "openai-compatible-realtime" => true,
+            "local-whisper" | "local" => !self
+                .local_whisper
+                .as_ref()
+                .is_some_and(LocalWhisperConfig::is_unsegmented),
+            _ => false,
+        }
+    }
+
+    /// Extra sentence for the streaming-dictation warnings when the user is
+    /// already on local-whisper: `segmentation = "none"` fixes it without leaving the
+    /// backend. Empty for every other backend, so no warning ever points a
+    /// user *towards* local-whisper (see `assert_no_stub_backend_advice`).
+    fn local_whisper_batch_hint(backend: &str) -> &'static str {
+        match backend {
+            "local-whisper" | "local" => {
+                " To keep local-whisper, set [local-whisper] segmentation = \"none\", \
+                 which types nothing until recording stops and then transcribes the \
+                 whole recording at once."
+            }
+            _ => "",
+        }
     }
 
     /// Load-time warnings about `[general] vocabulary` reaching Deepgram.
@@ -2939,6 +3063,21 @@ mod tests {
     }
 
     #[test]
+    fn config_history_defaults_on_and_can_be_disabled() {
+        let config: Config = toml::from_str("[general]\nbackend = \"groq\"\n").unwrap();
+        assert!(config.general.history, "history must stay on by default");
+        assert!(GeneralConfig::default().history);
+
+        let config: Config =
+            toml::from_str("[general]\nbackend = \"groq\"\nhistory = false\n").unwrap();
+        assert!(!config.general.history);
+        assert!(
+            unknown_config_keys("[general]\nbackend = \"groq\"\nhistory = false\n").is_empty(),
+            "history must not be reported as an unknown key"
+        );
+    }
+
+    #[test]
     fn config_tts_backend_and_url_roundtrip() {
         let config: Config = toml::from_str(
             r#"
@@ -3128,6 +3267,74 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("Unknown backend"));
         assert!(err.to_string().contains("openai-compatible-realtime"));
+    }
+
+    #[test]
+    fn overlay_position_parsing() {
+        assert_eq!(
+            OverlayPosition::parse("top-left"),
+            Some(OverlayPosition::TopLeft)
+        );
+        assert_eq!(
+            OverlayPosition::parse(" Top-Middle "),
+            Some(OverlayPosition::TopCenter)
+        );
+        assert_eq!(
+            OverlayPosition::parse("bottom-middle"),
+            Some(OverlayPosition::BottomCenter)
+        );
+        assert_eq!(OverlayPosition::parse("middle"), None);
+        for p in [
+            OverlayPosition::BottomLeft,
+            OverlayPosition::BottomCenter,
+            OverlayPosition::BottomRight,
+            OverlayPosition::TopLeft,
+            OverlayPosition::TopCenter,
+            OverlayPosition::TopRight,
+        ] {
+            assert_eq!(OverlayPosition::parse(p.as_str()), Some(p));
+        }
+    }
+
+    #[test]
+    fn overlay_position_defaults_to_bottom_center() {
+        let config: Config = toml::from_str("[overlay]\ntheme = \"ember\"\n").unwrap();
+        let overlay = config.overlay.unwrap();
+        assert_eq!(overlay.position, "bottom-center");
+        assert_eq!(overlay.position(), OverlayPosition::BottomCenter);
+    }
+
+    #[test]
+    fn config_validate_warns_unknown_overlay_position() {
+        let mut config = validatable_config("groq");
+        config.overlay = Some(OverlayConfig {
+            position: "upper-left".to_string(),
+            ..OverlayConfig::default()
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("[overlay] position = \"upper-left\"")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            config.overlay.unwrap().position(),
+            OverlayPosition::BottomCenter
+        );
+
+        let mut config = validatable_config("groq");
+        config.overlay = Some(OverlayConfig {
+            position: "top-right".to_string(),
+            ..OverlayConfig::default()
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.message.contains("[overlay] position")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -4613,7 +4820,8 @@ mod tests {
     fn config_validate_warns_llm_post_process_with_streaming_backend() {
         // local-whisper is in this list even though it is absent from the
         // llm_commands one: its transcribe() is a real batch path, but
-        // dictation with it always streams, so the flag no-ops there too.
+        // dictation with it streams by default (no [local-whisper] section
+        // here), so the flag no-ops there too.
         for backend in [
             "deepgram-streaming",
             "openai-realtime",
@@ -4671,6 +4879,79 @@ mod tests {
                 "backend {backend} goes through the batch path; no streaming warning expected: \
                  {warnings:?}"
             );
+        }
+    }
+
+    #[test]
+    fn config_validate_local_whisper_no_segmentation_takes_batch_path() {
+        // segmentation = "none" makes local-whisper dictation non-streaming,
+        // so neither batch-only key is inert and neither warning may fire.
+        for segmentation in ["none", " None "] {
+            let mut config = validatable_config("local-whisper");
+            config.general.llm_post_process = true;
+            config.input.paste = true;
+            config.local_whisper = Some(LocalWhisperConfig {
+                segmentation: segmentation.to_string(),
+                ..LocalWhisperConfig::new("/m.bin".to_string())
+            });
+
+            let warnings = config.validate().unwrap();
+            assert!(
+                warnings
+                    .iter()
+                    .all(|w| !w.message.contains("does not apply")),
+                "segmentation {segmentation:?} dictates through the batch path; no \
+                 streaming warning expected: {warnings:?}"
+            );
+        }
+    }
+
+    // `is_unsegmented` re-implements `SegmentationMode::parse` because the
+    // backend module is a stub without the feature. Tie the two together so
+    // the config warnings never disagree with what the backend does.
+    #[cfg(feature = "local-whisper")]
+    #[test]
+    fn local_whisper_is_unsegmented_matches_backend_parse() {
+        use crate::transcription::local_whisper::SegmentationMode;
+
+        for segmentation in [
+            "none", " NONE ", "None", "silence", "window", "bogus", "", "nones",
+        ] {
+            let config = LocalWhisperConfig {
+                segmentation: segmentation.to_string(),
+                ..LocalWhisperConfig::new("/m.bin".to_string())
+            };
+            assert_eq!(
+                config.is_unsegmented(),
+                SegmentationMode::parse(segmentation) == SegmentationMode::Unsegmented,
+                "segmentation {segmentation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_validate_local_whisper_streaming_warnings_point_at_no_segmentation() {
+        // On local-whisper the warnings name the in-backend fix; on every
+        // other backend they must not mention it.
+        for (backend, expect_hint) in [("local-whisper", true), ("openai-realtime", false)] {
+            let mut config = validatable_config(backend);
+            config.general.llm_post_process = true;
+            config.input.paste = true;
+
+            let warnings = config.validate().unwrap();
+            let streaming: Vec<_> = warnings
+                .iter()
+                .filter(|w| w.message.contains("does not apply"))
+                .collect();
+            assert_eq!(streaming.len(), 2, "{backend}: {warnings:?}");
+            for warning in streaming {
+                assert_eq!(
+                    warning.message.contains("segmentation = \"none\""),
+                    expect_hint,
+                    "{backend}: {}",
+                    warning.message
+                );
+            }
         }
     }
 
