@@ -147,13 +147,14 @@ A reply spanning several lines is typed normally \(em translating a paragraph
 or drafting an email is exactly what these commands are for. The one exception
 is a terminal: there a line break is an Enter that runs a command you have not
 read, so a multi-line reply aimed at a terminal is refused rather than typed.
-It is not lost \(em it is written to the history, where
+It is written to the history, where
 .B whisrs log
-recovers it, unless
+recovers it; with
 .B [general] history
-is
-.BR false ,
-in which case it is discarded. Ask for a one\-liner to get an injected result. The refusal also
+set to
+.B false
+there is no copy and it is discarded.
+Ask for a one\-liner to get an injected result. The refusal also
 applies with
 .B [input] paste
 set, since bracketed paste is the foreground program's choice and cannot be

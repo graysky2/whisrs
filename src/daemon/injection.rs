@@ -55,7 +55,7 @@ pub(crate) enum LlmInjection {
 /// case: `cd /tmp` out of `cd /tmp` + `rm -rf x` is a different, still
 /// destructive command. Refusing costs one retry and loses nothing — the text
 /// comes back in [`LlmInjection::RefusedMultiLine`] for the history log, where
-/// `whisrs log` recovers it.
+/// `whisrs log` recovers it (unless `[general] history = false`).
 ///
 /// **`[input] paste` is deliberately not a parameter.** The refusal fires the
 /// same way under `paste = true`, where the hazard is weaker: that path sends

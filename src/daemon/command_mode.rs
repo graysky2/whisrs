@@ -29,7 +29,8 @@ use crate::selection::{acquire_selected_text, capture_selection};
 /// Command mode does not otherwise log — the rewritten text lands on screen,
 /// and the original is still there to compare against. It logs on exactly one
 /// path: a multi-line result refused at a terminal, where the history entry is
-/// the only surviving copy and what `whisrs log` recovers.
+/// the only surviving copy and what `whisrs log` recovers. With
+/// `[general] history = false` it does not log, and the text is discarded.
 const COMMAND_MODE_HISTORY_BACKEND: &str = "command";
 
 /// The toast for a multi-line reply refused at a terminal. `label` names the
@@ -449,7 +450,8 @@ async fn command_mode_background_inner(
             // others report progress or a failure; this one is different in
             // kind, because it *withholds text the user would otherwise have
             // received*, and the history entry just written is the only
-            // surviving copy. `notify = false` means "do not narrate normal
+            // surviving copy (or there is none, with `[general] history =
+            // false`). `notify = false` means "do not narrate normal
             // operation", not "silently discard my work": gated, this outcome
             // is a `warn!` in the journal that nobody reads, and from the
             // user's chair the dictation simply vanished.
