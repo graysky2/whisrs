@@ -31,7 +31,8 @@ pub(crate) enum LlmInjection {
     Empty,
     /// Multi-line text aimed at a terminal. Never injected — see
     /// [`prepare_llm_injection`]. Carries the cleaned text so the caller can
-    /// put it in the history log instead of dropping it.
+    /// put it in the history log instead of dropping it (unless
+    /// `[general] history = false`).
     RefusedMultiLine(String),
 }
 
@@ -53,9 +54,9 @@ pub(crate) enum LlmInjection {
 ///
 /// Truncating to the first line was considered and rejected for the terminal
 /// case: `cd /tmp` out of `cd /tmp` + `rm -rf x` is a different, still
-/// destructive command. Refusing costs one retry and loses nothing — the text
-/// comes back in [`LlmInjection::RefusedMultiLine`] for the history log, where
-/// `whisrs log` recovers it.
+/// destructive command. Refusing costs one retry: the text comes back in
+/// [`LlmInjection::RefusedMultiLine`] for the history log, where `whisrs log`
+/// recovers it. With `[general] history = false` it is discarded.
 ///
 /// **`[input] paste` is deliberately not a parameter.** The refusal fires the
 /// same way under `paste = true`, where the hazard is weaker: that path sends
