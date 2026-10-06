@@ -329,7 +329,7 @@ pub fn run_setup() -> Result<()> {
     // 5. Extra options.
     let (remove_filler_words, audio_feedback) = configure_extras()?;
 
-    // 5b. Bottom recording overlay.
+    // 5b. Recording overlay.
     let (overlay, overlay_config) = configure_overlay();
 
     // 5c. Keyboard-injection backend.
@@ -1600,7 +1600,7 @@ fn setup_uinput_permissions() {
                         }
                     } else {
                         // Write the rule inline if contrib file not found.
-                        let rule = "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\"\nKERNEL==\"uinput\", SUBSYSTEM==\"misc\", TEST==\"/usr/bin/setfacl\", RUN+=\"/usr/bin/setfacl -m g:input:rw /dev/$name\"";
+                        let rule = "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"\nKERNEL==\"uinput\", SUBSYSTEM==\"misc\", TEST==\"/usr/bin/setfacl\", RUN+=\"/usr/bin/setfacl -m g:input:rw /dev/$name\"";
                         let status = std::process::Command::new("sudo")
                             .args([
                                 "bash",
@@ -2497,11 +2497,11 @@ fn configure_extras() -> Result<(bool, bool)> {
     Ok((remove_fillers, audio_feedback))
 }
 
-/// Ask the user whether to enable the bottom recording overlay, and on GNOME
+/// Ask the user whether to enable the recording overlay, and on GNOME
 /// offer to install the bundled Shell extension that renders it.
 fn configure_overlay() -> (bool, Option<crate::OverlayConfig>) {
     println!("\n{BOLD}Recording overlay (optional)...{RESET}");
-    println!("  {DIM}A small audio meter at the bottom of the screen while recording.{RESET}");
+    println!("  {DIM}A small on-screen audio meter while recording.{RESET}");
 
     let enable = Confirm::new()
         .with_prompt("Enable the recording overlay?")
