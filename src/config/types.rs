@@ -280,8 +280,7 @@ pub struct GeneralConfig {
     pub notify: bool,
     /// Save finished dictations to `history.jsonl` for `whisrs log`. On by
     /// default. `false` stops new writes only: existing entries stay until
-    /// `whisrs log --clear`, and the journal still records streaming
-    /// dictations at the default log level.
+    /// `whisrs log --clear`.
     #[serde(default = "default_true")]
     pub history: bool,
     /// Enable automatic filler word removal from transcriptions.

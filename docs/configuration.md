@@ -14,8 +14,7 @@ silence_timeout_ms = 2000   # auto-stop after silence (streaming only)
 notify = true               # desktop notifications
 history = true              # save dictations to ~/.local/share/whisrs/history.jsonl for
                             # `whisrs log`. false stops new writes only: existing
-                            # entries stay until `whisrs log --clear`, and the journal
-                            # still records streaming dictations at the default log level
+                            # entries stay until `whisrs log --clear`
 remove_filler_words = true  # strip "um", "uh", "you know", etc.
 filler_words = []           # custom list (empty = use built-in defaults)
 audio_feedback = true       # play tones on record start/stop/done
