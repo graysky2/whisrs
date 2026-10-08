@@ -60,6 +60,7 @@ src/
 │                           #   read-aloud: Idle → Synthesizing → Speaking → Idle)
 ├── history.rs              # Dictation history (whisrs log)
 ├── llm.rs                  # LLM calls for command mode
+├── replacements.rs         # [replacements]: whole-word fix-ups applied to dictated text
 ├── cli/main.rs             # whisrs CLI (thin client, sends commands over socket)
 ├── daemon/main.rs          # whisrsd daemon (audio, transcription, typing, IPC server)
 ├── audio/
