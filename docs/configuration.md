@@ -12,6 +12,9 @@ backend = "groq"            # groq | deepgram-streaming | deepgram | openai-real
 language = "en"             # ISO 639-1 or "auto"
 silence_timeout_ms = 2000   # auto-stop after silence (streaming only)
 notify = true               # desktop notifications
+history = true              # save dictations to ~/.local/share/whisrs/history.jsonl for
+                            # `whisrs log`. false stops new writes only: existing
+                            # entries stay until `whisrs log --clear`
 remove_filler_words = true  # strip "um", "uh", "you know", etc.
 filler_words = []           # custom list (empty = use built-in defaults)
 audio_feedback = true       # play tones on record start/stop/done
@@ -37,7 +40,7 @@ prompt = "Speech is in English or Spanish. Transcribe in the language spoken; ne
                             # `whisrsd` warns at startup if either key targets a backend
                             # that discards it. `whisrs config` warns the same on save.
 tray = true                 # system tray icon (requires SNI host like waybar)
-overlay = false             # bottom-screen recording overlay (Hyprland/Sway, GNOME extension)
+overlay = false             # on-screen recording overlay (Hyprland/Sway, GNOME extension)
 
 # Run every dictation through the [llm] backend before it is typed.
 # Default: false. This is the always-on flavor of [[llm_commands]] below:
@@ -75,6 +78,14 @@ llm_instruction = "Fix punctuation, capitalization and obvious transcription err
 theme = "carbon"            # "carbon" (default) | "ember" | "cyan" | "custom"
 width = 100                 # 90..=120 (clamped)
 height = 40                 # 36..=48 (clamped)
+# Where the pill sits: "bottom-center" (default) | "bottom-left" |
+# "bottom-right" | "top-left" | "top-center" | "top-right".
+# "-middle" works as a synonym for "-center". 16 px from the screen edges.
+# On GNOME this needs the Shell extension from this release. An older
+# one ignores the key and stays at the bottom center, and `whisrs setup`
+# does not replace an installed extension, so update it by hand
+# (contrib/gnome-shell-extension/README.md) and log out and back in.
+position = "bottom-center"
 
 # When theme = "custom", these override the named theme. Hex strings:
 # #RGB, #RRGGBB, or #RRGGBBAA. Anything missing falls back to carbon.
@@ -209,7 +220,8 @@ clipboard_only = false
 #     screen takes Ctrl+A as its prefix, and many tmux users rebind theirs to
 #     match.
 #   * a multi-line LLM reply is refused at a terminal and kept in `whisrs log`
-#     instead of being typed, including inside a terminal-hosted editor.
+#     instead of being typed (discarded with `[general] history = false`),
+#     including inside a terminal-hosted editor.
 #   * the selection copy fallback sends Ctrl+Shift+C instead of Ctrl+C. Stock
 #     xterm and urxvt do not bind Ctrl+Shift+C. The primary selection is tried
 #     first and covers a highlighted selection, so this affects the fallback
@@ -450,8 +462,9 @@ since both type the model's reply at the cursor.
   the line breaks are kept.
 - **A multi-line reply is refused when the focused window is a terminal.** There
   a line break is an Enter, which would run a command before you have read it.
-  The text is not lost: it goes to the history, so `whisrs log` prints it and you
-  can copy it from there. Ask for a one-liner to get an injected result.
+  The text goes to the history, so `whisrs log` prints it and you can copy it
+  from there. With `[general] history = false` there is no copy, so the result
+  is discarded. Ask for a one-liner to get an injected result.
   You are told when this happens: the "not typed" notification fires even with
   `[general] notify = false`, because that setting means "don't narrate normal
   operation", not "discard my dictation quietly".

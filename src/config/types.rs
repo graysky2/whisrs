@@ -102,7 +102,7 @@ pub struct HooksConfig {
     pub on_record_stop: Option<String>,
 }
 
-/// Visual configuration for the bottom recording overlay.
+/// Visual configuration for the recording overlay.
 ///
 /// The shape is intentionally clamped tight (90–120 × 36–48) to keep the
 /// gaussian-tapered bar layout legible. Themes pick the colors; if `colors`
@@ -119,6 +119,12 @@ pub struct OverlayConfig {
     /// Pill height in pixels (clamped to 36..=48).
     #[serde(default = "default_overlay_height")]
     pub height: u32,
+    /// Screen corner or edge the pill sits at: `"bottom-center"` (default),
+    /// `"bottom-left"`, `"bottom-right"`, `"top-left"`, `"top-center"` or
+    /// `"top-right"`. `-middle` is accepted for `-center`. Unknown values
+    /// fall back to `"bottom-center"`; [`Config::validate`] warns.
+    #[serde(default = "default_overlay_position")]
+    pub position: String,
     /// Custom color overrides; honored when `theme = "custom"`.
     /// Hex strings: `#RGB`, `#RRGGBB`, or `#RRGGBBAA`.
     #[serde(default)]
@@ -145,6 +151,69 @@ fn default_overlay_width() -> u32 {
 fn default_overlay_height() -> u32 {
     40
 }
+fn default_overlay_position() -> String {
+    "bottom-center".to_string()
+}
+
+/// Where the overlay pill is placed on screen. See [`OverlayConfig::position`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverlayPosition {
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+    TopLeft,
+    TopCenter,
+    TopRight,
+}
+
+/// Horizontal placement of the overlay pill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayHAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl OverlayPosition {
+    /// Parse a config string (trimmed, case-insensitive). `None` if unknown.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "bottom-left" => Self::BottomLeft,
+            "bottom-center" | "bottom-middle" => Self::BottomCenter,
+            "bottom-right" => Self::BottomRight,
+            "top-left" => Self::TopLeft,
+            "top-center" | "top-middle" => Self::TopCenter,
+            "top-right" => Self::TopRight,
+            _ => return None,
+        })
+    }
+
+    /// Canonical config spelling, also sent to the GNOME extension.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BottomLeft => "bottom-left",
+            Self::BottomCenter => "bottom-center",
+            Self::BottomRight => "bottom-right",
+            Self::TopLeft => "top-left",
+            Self::TopCenter => "top-center",
+            Self::TopRight => "top-right",
+        }
+    }
+
+    /// Whether the pill sits at the top edge (and grows down from it).
+    pub fn is_top(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopCenter | Self::TopRight)
+    }
+
+    pub fn h_align(self) -> OverlayHAlign {
+        match self {
+            Self::BottomLeft | Self::TopLeft => OverlayHAlign::Left,
+            Self::BottomCenter | Self::TopCenter => OverlayHAlign::Center,
+            Self::BottomRight | Self::TopRight => OverlayHAlign::Right,
+        }
+    }
+}
 
 impl Default for OverlayConfig {
     fn default() -> Self {
@@ -152,6 +221,7 @@ impl Default for OverlayConfig {
             theme: default_overlay_theme(),
             width: default_overlay_width(),
             height: default_overlay_height(),
+            position: default_overlay_position(),
             colors: None,
         }
     }
@@ -165,6 +235,10 @@ impl OverlayConfig {
     }
     pub fn clamped_height(&self) -> u32 {
         self.height.clamp(36, 48)
+    }
+    /// Parsed [`Self::position`]; unknown values fall back to the default.
+    pub fn position(&self) -> OverlayPosition {
+        OverlayPosition::parse(&self.position).unwrap_or_default()
     }
 }
 
@@ -209,6 +283,11 @@ pub struct GeneralConfig {
     pub silence_timeout_ms: u64,
     #[serde(default = "default_true")]
     pub notify: bool,
+    /// Save finished dictations to `history.jsonl` for `whisrs log`. On by
+    /// default. `false` stops new writes only: existing entries stay until
+    /// `whisrs log --clear`.
+    #[serde(default = "default_true")]
+    pub history: bool,
     /// Enable automatic filler word removal from transcriptions.
     #[serde(default)]
     pub remove_filler_words: bool,
@@ -233,7 +312,7 @@ pub struct GeneralConfig {
     /// Enable system tray icon.
     #[serde(default = "default_true")]
     pub tray: bool,
-    /// Enable bottom-screen recording overlay.
+    /// Enable the on-screen recording overlay.
     #[serde(default)]
     pub overlay: bool,
     /// Run every finished dictation through the shared `[llm]` backend, using
@@ -267,6 +346,7 @@ impl Default for GeneralConfig {
             language: default_language(),
             silence_timeout_ms: default_silence_timeout(),
             notify: true,
+            history: true,
             remove_filler_words: false,
             filler_words: Vec::new(),
             audio_feedback: false,
@@ -1627,6 +1707,19 @@ impl Config {
             // aliases fall through to their primary's arm above, so this is
             // the empty case, not a silent skip of a check that exists.
             _ => {}
+        }
+
+        if let Some(overlay) = &self.overlay {
+            if OverlayPosition::parse(&overlay.position).is_none() {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[overlay] position = {:?} is not a known position, using \
+                         \"bottom-center\". Use one of: bottom-left, bottom-center, \
+                         bottom-right, top-left, top-center, top-right.",
+                        overlay.position
+                    ),
+                });
+            }
         }
 
         if self.general.silence_timeout_ms == 0 {
@@ -3044,6 +3137,21 @@ mod tests {
     }
 
     #[test]
+    fn config_history_defaults_on_and_can_be_disabled() {
+        let config: Config = toml::from_str("[general]\nbackend = \"groq\"\n").unwrap();
+        assert!(config.general.history, "history must stay on by default");
+        assert!(GeneralConfig::default().history);
+
+        let config: Config =
+            toml::from_str("[general]\nbackend = \"groq\"\nhistory = false\n").unwrap();
+        assert!(!config.general.history);
+        assert!(
+            unknown_config_keys("[general]\nbackend = \"groq\"\nhistory = false\n").is_empty(),
+            "history must not be reported as an unknown key"
+        );
+    }
+
+    #[test]
     fn config_tts_backend_and_url_roundtrip() {
         let config: Config = toml::from_str(
             r#"
@@ -3234,6 +3342,74 @@ mod tests {
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("Unknown backend"));
         assert!(err.to_string().contains("openai-compatible-realtime"));
+    }
+
+    #[test]
+    fn overlay_position_parsing() {
+        assert_eq!(
+            OverlayPosition::parse("top-left"),
+            Some(OverlayPosition::TopLeft)
+        );
+        assert_eq!(
+            OverlayPosition::parse(" Top-Middle "),
+            Some(OverlayPosition::TopCenter)
+        );
+        assert_eq!(
+            OverlayPosition::parse("bottom-middle"),
+            Some(OverlayPosition::BottomCenter)
+        );
+        assert_eq!(OverlayPosition::parse("middle"), None);
+        for p in [
+            OverlayPosition::BottomLeft,
+            OverlayPosition::BottomCenter,
+            OverlayPosition::BottomRight,
+            OverlayPosition::TopLeft,
+            OverlayPosition::TopCenter,
+            OverlayPosition::TopRight,
+        ] {
+            assert_eq!(OverlayPosition::parse(p.as_str()), Some(p));
+        }
+    }
+
+    #[test]
+    fn overlay_position_defaults_to_bottom_center() {
+        let config: Config = toml::from_str("[overlay]\ntheme = \"ember\"\n").unwrap();
+        let overlay = config.overlay.unwrap();
+        assert_eq!(overlay.position, "bottom-center");
+        assert_eq!(overlay.position(), OverlayPosition::BottomCenter);
+    }
+
+    #[test]
+    fn config_validate_warns_unknown_overlay_position() {
+        let mut config = validatable_config("groq");
+        config.overlay = Some(OverlayConfig {
+            position: "upper-left".to_string(),
+            ..OverlayConfig::default()
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("[overlay] position = \"upper-left\"")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            config.overlay.unwrap().position(),
+            OverlayPosition::BottomCenter
+        );
+
+        let mut config = validatable_config("groq");
+        config.overlay = Some(OverlayConfig {
+            position: "top-right".to_string(),
+            ..OverlayConfig::default()
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.message.contains("[overlay] position")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

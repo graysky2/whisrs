@@ -82,6 +82,8 @@ pub(crate) struct StreamingPipelineParams {
     /// `[input] terminal_classes`, for folding line breaks in deltas typed
     /// into a terminal ([`fold_line_breaks_at_terminal`]).
     pub(crate) terminal_classes: Vec<String>,
+    /// `[general] history`: save the transcript for `whisrs log`.
+    pub(crate) history: bool,
 }
 
 /// The streaming pipeline: reads audio in real-time, sends to API, types text.
@@ -110,6 +112,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
         clipboard_fallback,
         clipboard_only,
         terminal_classes,
+        history,
     } = params;
     // State-progress toasts are noise when the overlay is on.
     let notify_state = notify && !overlay_enabled;
@@ -224,7 +227,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
                         .await
                         {
                             Ok(Ok((StreamingDelivery::Typed, text))) => {
-                                info!("typed: {text:?}");
+                                debug!("typed: {text:?}");
                             }
                             Ok(Ok((StreamingDelivery::Cancelled, text))) => {
                                 info!(
@@ -408,7 +411,7 @@ pub(crate) async fn run_streaming_pipeline(params: StreamingPipelineParams) -> R
     // Save to history if we got any text.
     if !full_text.is_empty() {
         let duration_secs = pipeline_start.elapsed().as_secs_f64();
-        save_history_entry(&full_text, &backend_name, &language, duration_secs);
+        save_history_entry(history, &full_text, &backend_name, &language, duration_secs);
     }
 
     // If auto-stop happened, we need to transition to Idle.
@@ -1286,8 +1289,18 @@ fn transcription_prompt(prompt: Option<&str>, vocabulary: &[String]) -> Option<S
     }
 }
 
-/// Save a transcription to the history file.
-pub(crate) fn save_history_entry(text: &str, backend: &str, language: &str, duration_secs: f64) {
+/// Save a transcription to the history file, unless `[general] history` is
+/// off. `enabled` is a parameter, not a lookup, so no caller can skip the check.
+pub(crate) fn save_history_entry(
+    enabled: bool,
+    text: &str,
+    backend: &str,
+    language: &str,
+    duration_secs: f64,
+) {
+    if !enabled {
+        return;
+    }
     let entry = HistoryEntry {
         timestamp: chrono::Local::now(),
         text: text.to_string(),
