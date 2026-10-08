@@ -14,7 +14,8 @@
 //! - a single pass, so a replacement is never itself re-matched.
 //!
 //! Values are inserted verbatim. An empty value deletes the match together
-//! with the spaces after it, so `"um" = ""` leaves no double space behind.
+//! with the spaces after it, so no double space is left behind; punctuation
+//! next to the match stays.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -23,12 +24,27 @@ use regex::Regex;
 
 /// Unicode `\w`: letters, marks, digits, connector punctuation. Wider than
 /// `char::is_alphanumeric`, which misses combining marks (a virama would
-/// otherwise count as a word edge).
+/// otherwise count as a word edge). The same `\w` that Unicode `\b` and `\B`
+/// use, so classifying a key edge here agrees with the assertion it picks.
 static WORD_CHAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w$").unwrap());
 
 fn is_word_char(c: char) -> bool {
     let mut buf = [0; 4];
     WORD_CHAR.is_match(c.encode_utf8(&mut buf))
+}
+
+/// The assertion that makes a key edge a whole-word edge, picked by the
+/// key's char at that edge. A word char takes `\b`. A non-word char (`c#`,
+/// `.net`) cannot: `\b` there would demand a word char on the far side, the
+/// opposite of what is wanted. `\B` holds exactly when the far side is a
+/// non-word char or the start/end of the text, which is the rule. The `regex`
+/// crate has no lookaround to say "no word char there" directly.
+fn edge(c: char) -> &'static str {
+    if is_word_char(c) {
+        r"\b"
+    } else {
+        r"\B"
+    }
 }
 
 /// The words of a key: split on whitespace and hyphens. A hyphen at either
@@ -50,7 +66,9 @@ pub fn normalize(key: &str) -> String {
 /// A compiled replacement table. Build once per dictation, apply per chunk.
 #[derive(Debug, Clone)]
 pub struct Replacer {
-    /// `(?i)(key0)|(key1)|...` followed by a capture of trailing spaces.
+    /// `(?i)(?:\b(key0)\b|\B(key1)\b|...)` followed by a capture of trailing
+    /// spaces, each key wrapped in the edge assertions its own first and last
+    /// chars call for.
     re: Regex,
     /// `values[i]` replaces a match of capture group `i + 1`.
     values: Vec<String>,
@@ -60,8 +78,9 @@ impl Replacer {
     /// Compile `table`. Returns `Ok(None)` when it holds no usable key (empty,
     /// or only blank keys), so callers can skip the pass entirely.
     pub fn new(table: &BTreeMap<String, String>) -> Result<Option<Self>, regex::Error> {
-        // Keys that normalize alike would match the same text; keep the last,
-        // as a TOML-order reader would expect. `validate` warns about these.
+        // Keys that normalize alike would match the same text. The table is a
+        // BTreeMap, so the one kept is the original key that sorts last (byte
+        // order, not file order). `validate` warns and names the winner.
         let mut unique: BTreeMap<String, (&str, &str)> = BTreeMap::new();
         for (key, value) in table {
             let norm = normalize(key);
@@ -84,14 +103,28 @@ impl Replacer {
         // Built from the original key's words, not the lowercased form:
         // `(?i)` uses simple case folding, which full `to_lowercase` does not
         // always agree with ("İ" lowercases to two chars).
+        //
+        // The whole-word check lives inside each alternative, so when a longer
+        // key fails it at some position the engine falls back to a shorter key
+        // starting there ("whisper" in "whisper supports").
         let alternatives: Vec<String> = entries
             .iter()
             .map(|(_, key, _)| {
-                let body = words(key)
+                // Only keys with a non-blank normalized form get here, so
+                // there is at least one word and every word is non-empty.
+                let parts: Vec<&str> = words(key).collect();
+                let first = parts[0].chars().next().expect("non-empty word");
+                let last = parts[parts.len() - 1]
+                    .chars()
+                    .next_back()
+                    .expect("non-empty word");
+                let body = parts
+                    .iter()
+                    .copied()
                     .map(regex::escape)
                     .collect::<Vec<_>>()
                     .join(r"[\s-]+");
-                format!("({body})")
+                format!("{}({body}){}", edge(first), edge(last))
             })
             .collect();
 
@@ -105,8 +138,7 @@ impl Replacer {
         let trailing = self.values.len() + 1;
         let mut out = String::with_capacity(text.len());
         let mut copied = 0;
-        let mut pos = 0;
-        while let Some(caps) = self.re.captures_at(text, pos) {
+        for caps in self.re.captures_iter(text) {
             let (index, key) = caps
                 .iter()
                 .enumerate()
@@ -115,32 +147,14 @@ impl Replacer {
                 .find_map(|(i, m)| m.map(|m| (i - 1, m)))
                 .expect("one alternative matched");
 
-            // Whole words only. Checked here rather than with `\b` because
-            // `\b` next to a non-word key edge (`c#`, `.net`) would demand the
-            // opposite of a boundary.
-            let before = text[..key.start()].chars().next_back();
-            let after = text[key.end()..].chars().next();
-            if before.is_some_and(is_word_char) || after.is_some_and(is_word_char) {
-                // Retry one character further on, so a shorter key starting
-                // inside the rejected match can still be found.
-                let step = text[key.start()..].chars().next().map_or(1, char::len_utf8);
-                pos = key.start() + step;
-                continue;
-            }
-
             let value = &self.values[index];
-            let end = if value.is_empty() {
+            out.push_str(&text[copied..key.start()]);
+            out.push_str(value);
+            copied = if value.is_empty() {
                 caps.get(trailing).map_or(key.end(), |m| m.end())
             } else {
                 key.end()
             };
-            out.push_str(&text[copied..key.start()]);
-            out.push_str(value);
-            copied = end;
-            pos = end;
-            if pos >= text.len() {
-                break;
-            }
         }
         out.push_str(&text[copied..]);
         out
@@ -218,6 +232,17 @@ mod tests {
     fn rejected_match_does_not_hide_a_later_one() {
         let r = replacer(&[("ab", "X")]);
         assert_eq!(r.apply("aab ab"), "aab X");
+    }
+
+    #[test]
+    fn shorter_key_matches_when_longer_key_fails_word_edge() {
+        let r = replacer(&[("whisper s", "whisrs"), ("whisper", "Whisper")]);
+        assert_eq!(r.apply("whisper supports it"), "Whisper supports it");
+        assert_eq!(r.apply("whisper s now"), "whisrs now");
+
+        let r = replacer(&[("react", "React"), ("react native", "React Native")]);
+        assert_eq!(r.apply("react nativescript"), "React nativescript");
+        assert_eq!(r.apply("react native app"), "React Native app");
     }
 
     #[test]
