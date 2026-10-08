@@ -174,14 +174,15 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
             let local_whisper = local_whisper_settings(config);
             info!(
                 "using local whisper transcription backend \
-                 (model: {}, segmentation: {})",
-                local_whisper.model_path, local_whisper.segmentation
+                 (model: {}, segmentation: {}, flash_attn: {})",
+                local_whisper.model_path, local_whisper.segmentation, local_whisper.flash_attn
             );
             Arc::new(
-                LocalWhisperBackend::new(local_whisper.model_path).with_segmentation(
-                    &local_whisper.segmentation,
-                    local_whisper.phrase_silence_ms,
-                ),
+                LocalWhisperBackend::with_flash_attn(
+                    local_whisper.model_path,
+                    local_whisper.flash_attn,
+                )
+                .with_segmentation(&local_whisper.segmentation, local_whisper.phrase_silence_ms),
             )
         }
         "local-vosk" => {
