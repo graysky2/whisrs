@@ -1956,6 +1956,42 @@ mod tests {
         );
     }
 
+    /// `[replacements]` is wired into the batch path, not just the streaming
+    /// batcher, and stays off for command mode, whose transcript is an
+    /// instruction for the LLM rather than text to type.
+    #[tokio::test]
+    async fn batch_path_applies_replacements_to_dictation_only() {
+        const SPOKEN: &str = "edit the package build file";
+        let mut context = context_with_backend(StubBackend {
+            text: SPOKEN,
+            sends_prompt: false,
+        });
+        context
+            .config
+            .replacements
+            .insert("package build".to_string(), "PKGBUILD".to_string());
+
+        let dictated = transcribe_batch_audio(
+            &audio_that_passes_the_gate(),
+            &context,
+            "en",
+            &BatchOptions::dictation(),
+        )
+        .await
+        .expect("the stub backend never fails");
+        assert_eq!(dictated, "edit the PKGBUILD file");
+
+        let instruction = transcribe_batch_audio(
+            &audio_that_passes_the_gate(),
+            &context,
+            "en",
+            &BatchOptions::command_mode(),
+        )
+        .await
+        .expect("the stub backend never fails");
+        assert_eq!(instruction, SPOKEN);
+    }
+
     // ── Toggle-path LLM post-processing (issue #85) ─────────────────────
 
     /// Parse a config from TOML, with a `[general] backend` already set so
