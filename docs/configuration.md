@@ -555,27 +555,28 @@ every time, map the wrong text to the right one:
 ```
 
 Every dictation is rewritten before it is typed, copied or logged. Keys match
-ignoring case, on whole words, with any spaces or hyphens between the words, so
-"Package-build" matches too. Quote every key: unquoted, `node.js = "Node.js"`
-is a nested table in TOML, so config.toml fails to parse and the daemon falls
-back to built-in defaults. Surrounding punctuation is kept ("package build."
-becomes "PKGBUILD."). Values are inserted exactly as written. Where keys
-overlap the longest one wins, and a replacement is never itself replaced
-again. An empty value deletes the match and the spaces after it, but not the
+ignoring case, on whole words, with any spaces or hyphens between the words,
+so "Package-build" matches too. Quote every key: unquoted,
+`node.js = "Node.js"` is a nested table in TOML, so config.toml fails to
+parse and the daemon falls back to built-in defaults. Surrounding punctuation is kept
+("package build." becomes "PKGBUILD."). Values are inserted exactly as
+written. Text is scanned left to right: where several keys start at the same
+word the longest one wins, and a replacement is never itself replaced again.
+An empty value deletes the match and the spaces after it, but not the
 punctuation next to it. Leave filler words to `remove_filler_words`, which
 takes their commas too. Command mode and `[[llm_commands]]` instructions are
 left alone. With `llm_post_process` on, replacements run first, so the LLM
 sees the corrected text (and can still rewrite it).
 
 On streaming backends the text is rewritten one typed chunk at a time. With
-`local-whisper` phrase segmentation a chunk is a whole phrase, so this only
-misses if you pause in the middle of a key. `deepgram-streaming` sends only
-final results, which end between words: it can split a multi-word key across
-two chunks where Deepgram closes a segment (usually a pause), in which case it
-does not match, but never cuts a word. `openai-realtime` streams tokens, so a
-chunk can also end in the middle of a word, and a key like "pack" can match
-the first half of "package". Batch backends see the whole transcript and are
-not affected.
+`local-whisper` phrase segmentation or `openai-compatible-realtime` a chunk is
+a whole phrase, so this only misses if you pause in the middle of a key.
+`deepgram-streaming` sends only final results, which end between words: it can
+split a multi-word key across two chunks where Deepgram closes a segment
+(usually a pause), in which case it does not match, but never cuts a word.
+`openai-realtime` streams tokens, so a chunk can also end in the middle of a
+word, and a key like "pack" can match the first half of "package". Batch
+backends see the whole transcript and are not affected.
 
 ## Environment variables
 

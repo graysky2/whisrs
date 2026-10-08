@@ -10,7 +10,7 @@
 //!   after the match, whatever the key's own edge characters are);
 //! - any run of whitespace or hyphens between the words of a key matches
 //!   ("Package-build" matches `"package build"`);
-//! - the longest key wins where keys overlap;
+//! - left to right; of the keys starting at one position, the longest wins;
 //! - a single pass, so a replacement is never itself re-matched.
 //!
 //! Values are inserted verbatim. An empty value deletes the match together
