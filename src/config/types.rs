@@ -61,6 +61,11 @@ pub struct Config {
     /// [`llm::LlmCommandConfig`]). Empty by default.
     #[serde(default)]
     pub llm_commands: Vec<llm::LlmCommandConfig>,
+    /// Word/phrase replacements applied to every dictation before it is
+    /// typed: `"package build" = "PKGBUILD"`. Matching rules are in
+    /// [`crate::replacements`]. Empty by default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub replacements: BTreeMap<String, String>,
 }
 
 /// Global hotkey configuration — key combos that trigger actions.
@@ -1979,7 +1984,52 @@ impl Config {
             }
         }
 
+        warnings.extend(self.replacement_warnings());
+
         Ok(warnings)
+    }
+
+    /// Load-time warnings about `[replacements]`: a table that will not
+    /// compile (caught here rather than after the first transcription), blank
+    /// keys (never match), keys with a hyphen at either end (it is dropped)
+    /// and keys that differ only in case or spacing (only one of them wins).
+    fn replacement_warnings(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+        if let Err(e) = crate::replacements::Replacer::new(&self.replacements) {
+            warnings.push(ConfigWarning {
+                message: format!(
+                    "[replacements] could not be compiled, so dictation will fail: {e}"
+                ),
+            });
+        }
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for key in self.replacements.keys() {
+            let norm = crate::replacements::normalize(key);
+            if norm.is_empty() {
+                warnings.push(ConfigWarning {
+                    message: format!("[replacements] key {key:?} is blank and never matches"),
+                });
+                continue;
+            }
+            let trimmed = key.trim();
+            if trimmed.starts_with('-') || trimmed.ends_with('-') {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[replacements] key {key:?}: a hyphen at the start or end is \
+                         ignored, so it matches {norm:?}"
+                    ),
+                });
+            }
+            if let Some(first) = seen.insert(norm, key) {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[replacements] keys {first:?} and {key:?} match the same text \
+                         (matching ignores case and spacing), so only {key:?} is used"
+                    ),
+                });
+            }
+        }
+        warnings
     }
 
     /// The Deepgram model this config will actually transcribe with.
@@ -2623,6 +2673,31 @@ mod tests {
     }
 
     #[test]
+    fn replacements_parse_and_are_known_keys() {
+        let toml = "[replacements]\n\"package build\" = \"PKGBUILD\"\n";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.replacements["package build"], "PKGBUILD");
+        assert!(unknown_config_keys(toml).is_empty());
+        assert!(unknown_config_keys("[replacements]\n").is_empty());
+    }
+
+    #[test]
+    fn replacements_warn_on_blank_and_colliding_keys() {
+        let config: Config = toml::from_str(
+            "[replacements]\n\" \" = \"x\"\n\"Foo Bar\" = \"a\"\n\"foo-bar\" = \"b\"\n",
+        )
+        .unwrap();
+        let messages: Vec<String> = config
+            .replacement_warnings()
+            .into_iter()
+            .map(|w| w.message)
+            .collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].contains("blank"));
+        assert!(messages[1].contains("\"Foo Bar\" and \"foo-bar\""));
+    }
+
+    #[test]
     fn unknown_nested_key_reports_full_path() {
         // The live case from #99: `past` is a typo for `paste`.
         let unknown = unknown_config_keys("[input]\npast = true\n");
@@ -3261,6 +3336,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let err = config.validate().unwrap_err();
@@ -3376,6 +3452,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let err = config.validate().unwrap_err();
@@ -3407,6 +3484,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let result = config.validate();
@@ -3441,6 +3519,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let warnings = config.validate().unwrap();
@@ -3482,6 +3561,7 @@ mod tests {
                 hotkeys: None,
                 hooks: None,
                 llm_commands: Vec::new(),
+                replacements: BTreeMap::new(),
                 overlay: None,
             };
             let warnings = config.validate().unwrap();
@@ -3560,6 +3640,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         }
     }
@@ -3783,6 +3864,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
 
@@ -4045,6 +4127,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let warnings = config.validate().unwrap();
@@ -4101,6 +4184,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4135,6 +4219,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4170,6 +4255,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4205,6 +4291,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4240,6 +4327,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4272,6 +4360,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4346,6 +4435,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4386,6 +4476,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4428,6 +4519,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4495,6 +4587,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4549,6 +4642,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         }

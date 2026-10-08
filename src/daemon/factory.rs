@@ -336,6 +336,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: Default::default(),
             overlay: None,
             tts: None,
         }
@@ -476,6 +477,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: Default::default(),
             overlay: None,
             tts: None,
         };
