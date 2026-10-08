@@ -100,23 +100,24 @@ GGML_CUDA_COMPRESSION_MODE=none CMAKE_CUDA_ARCHITECTURES=89-real \
   cargo install whisrs --features cuda
 ```
 
+Cargo does not track either variable, so changing one does not rebuild anything
+on its own. Add `--force` to `cargo install whisrs` to rebuild with the new
+values; in a source checkout, run `cargo clean -p whisper-rs-sys` first.
+
 **Turn on flash attention.** This is a runtime setting, not a build option.
 Flash attention is a faster way for the model to compute attention that can cut
-decode time on a GPU build, most noticeably on long recordings. It is off by
-default. Enable it in `~/.config/whisrs/config.toml`, then restart the daemon:
+transcription time on a CUDA build, most noticeably on long recordings. It is
+off by default. Enable it in `~/.config/whisrs/config.toml`, then restart the
+daemon:
 
 ```toml
 [local-whisper]
 flash_attn = true
 ```
 
-Run the daemon with `RUST_LOG=debug` and look for `flash attn = 1` in the
-whisper init lines to confirm it took effect.
-
-<!-- flash_attn is added by upstream PR #191. Drop this paragraph if that PR is not merged. -->
-
-Changing either build variable only takes effect on a clean rebuild of the bundled
-whisper.cpp, so run `cargo clean` first if you already built with `cuda`.
+When it took effect, whisper.cpp's init lines in the daemon log show
+`flash attn = 1`. Leave it off on Vulkan and CPU builds: it was slower there,
+and on an Intel iGPU under Vulkan it also hung the GPU.
 
 ## Upgrading over a distro package or tarball install
 
