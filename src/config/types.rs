@@ -61,6 +61,11 @@ pub struct Config {
     /// [`llm::LlmCommandConfig`]). Empty by default.
     #[serde(default)]
     pub llm_commands: Vec<llm::LlmCommandConfig>,
+    /// Word/phrase replacements applied to every dictation before it is
+    /// typed: `"package build" = "PKGBUILD"`. Matching rules are in
+    /// [`crate::replacements`]. Empty by default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub replacements: BTreeMap<String, String>,
 }
 
 /// Global hotkey configuration — key combos that trigger actions.
@@ -278,6 +283,11 @@ pub struct GeneralConfig {
     pub silence_timeout_ms: u64,
     #[serde(default = "default_true")]
     pub notify: bool,
+    /// Save finished dictations to `history.jsonl` for `whisrs log`. On by
+    /// default. `false` stops new writes only: existing entries stay until
+    /// `whisrs log --clear`.
+    #[serde(default = "default_true")]
+    pub history: bool,
     /// Enable automatic filler word removal from transcriptions.
     #[serde(default)]
     pub remove_filler_words: bool,
@@ -336,6 +346,7 @@ impl Default for GeneralConfig {
             language: default_language(),
             silence_timeout_ms: default_silence_timeout(),
             notify: true,
+            history: true,
             remove_filler_words: false,
             filler_words: Vec::new(),
             audio_feedback: false,
@@ -636,6 +647,11 @@ pub struct LocalWhisperConfig {
     /// segmentation mode.
     #[serde(default = "default_phrase_silence_ms")]
     pub phrase_silence_ms: u64,
+    /// Turn on whisper.cpp flash attention when the model loads. Off by
+    /// default: it only helps on some GPU builds and can change output
+    /// slightly.
+    #[serde(default)]
+    pub flash_attn: bool,
 }
 
 impl LocalWhisperConfig {
@@ -645,6 +661,7 @@ impl LocalWhisperConfig {
             model_path,
             segmentation: default_local_whisper_segmentation(),
             phrase_silence_ms: default_phrase_silence_ms(),
+            flash_attn: false,
         }
     }
 
@@ -1973,7 +1990,52 @@ impl Config {
             }
         }
 
+        warnings.extend(self.replacement_warnings());
+
         Ok(warnings)
+    }
+
+    /// Load-time warnings about `[replacements]`: a table that will not
+    /// compile (caught here rather than after the first transcription), blank
+    /// keys (never match), keys with a hyphen at either end (it is dropped)
+    /// and keys that differ only in case or spacing (only one of them wins).
+    fn replacement_warnings(&self) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+        if let Err(e) = crate::replacements::Replacer::new(&self.replacements) {
+            warnings.push(ConfigWarning {
+                message: format!(
+                    "[replacements] could not be compiled, so dictation will fail: {e}"
+                ),
+            });
+        }
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for key in self.replacements.keys() {
+            let norm = crate::replacements::normalize(key);
+            if norm.is_empty() {
+                warnings.push(ConfigWarning {
+                    message: format!("[replacements] key {key:?} is blank and never matches"),
+                });
+                continue;
+            }
+            let trimmed = key.trim();
+            if trimmed.starts_with('-') || trimmed.ends_with('-') {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[replacements] key {key:?}: a hyphen at the start or end is \
+                         ignored, so it matches {norm:?}"
+                    ),
+                });
+            }
+            if let Some(first) = seen.insert(norm, key) {
+                warnings.push(ConfigWarning {
+                    message: format!(
+                        "[replacements] keys {first:?} and {key:?} match the same text \
+                         (matching ignores case and spacing), so only {key:?} is used"
+                    ),
+                });
+            }
+        }
+        warnings
     }
 
     /// The Deepgram model this config will actually transcribe with.
@@ -2608,12 +2670,39 @@ mod tests {
         assert_eq!(from_serde.model_path, from_default.model_path);
         assert_eq!(from_serde.segmentation, from_default.segmentation);
         assert_eq!(from_serde.phrase_silence_ms, from_default.phrase_silence_ms);
+        assert_eq!(from_serde.flash_attn, from_default.flash_attn);
+        assert!(!from_default.flash_attn);
     }
 
     #[test]
     fn unknown_top_level_key_is_reported() {
         let unknown = unknown_config_keys("bogus = 1\n[general]\nbackend = \"groq\"\n");
         assert_eq!(unknown, vec!["bogus"]);
+    }
+
+    #[test]
+    fn replacements_parse_and_are_known_keys() {
+        let toml = "[replacements]\n\"package build\" = \"PKGBUILD\"\n";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.replacements["package build"], "PKGBUILD");
+        assert!(unknown_config_keys(toml).is_empty());
+        assert!(unknown_config_keys("[replacements]\n").is_empty());
+    }
+
+    #[test]
+    fn replacements_warn_on_blank_and_colliding_keys() {
+        let config: Config = toml::from_str(
+            "[replacements]\n\" \" = \"x\"\n\"Foo Bar\" = \"a\"\n\"foo-bar\" = \"b\"\n",
+        )
+        .unwrap();
+        let messages: Vec<String> = config
+            .replacement_warnings()
+            .into_iter()
+            .map(|w| w.message)
+            .collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].contains("blank"));
+        assert!(messages[1].contains("\"Foo Bar\" and \"foo-bar\""));
     }
 
     #[test]
@@ -3056,6 +3145,21 @@ mod tests {
     }
 
     #[test]
+    fn config_history_defaults_on_and_can_be_disabled() {
+        let config: Config = toml::from_str("[general]\nbackend = \"groq\"\n").unwrap();
+        assert!(config.general.history, "history must stay on by default");
+        assert!(GeneralConfig::default().history);
+
+        let config: Config =
+            toml::from_str("[general]\nbackend = \"groq\"\nhistory = false\n").unwrap();
+        assert!(!config.general.history);
+        assert!(
+            unknown_config_keys("[general]\nbackend = \"groq\"\nhistory = false\n").is_empty(),
+            "history must not be reported as an unknown key"
+        );
+    }
+
+    #[test]
     fn config_tts_backend_and_url_roundtrip() {
         let config: Config = toml::from_str(
             r#"
@@ -3240,6 +3344,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let err = config.validate().unwrap_err();
@@ -3355,6 +3460,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let err = config.validate().unwrap_err();
@@ -3386,6 +3492,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let result = config.validate();
@@ -3420,6 +3527,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let warnings = config.validate().unwrap();
@@ -3461,6 +3569,7 @@ mod tests {
                 hotkeys: None,
                 hooks: None,
                 llm_commands: Vec::new(),
+                replacements: BTreeMap::new(),
                 overlay: None,
             };
             let warnings = config.validate().unwrap();
@@ -3539,6 +3648,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         }
     }
@@ -3762,6 +3872,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
 
@@ -4024,6 +4135,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
         };
         let warnings = config.validate().unwrap();
@@ -4080,6 +4192,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4114,6 +4227,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4149,6 +4263,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4184,6 +4299,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4219,6 +4335,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4251,6 +4368,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4325,6 +4443,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4365,6 +4484,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4407,6 +4527,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4474,6 +4595,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         };
@@ -4528,6 +4650,7 @@ mod tests {
             hotkeys: None,
             hooks: None,
             llm_commands: Vec::new(),
+            replacements: BTreeMap::new(),
             overlay: None,
             tts: None,
         }

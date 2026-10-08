@@ -378,6 +378,7 @@ pub fn run_setup() -> Result<()> {
         hooks: None,
         overlay: if overlay { overlay_config } else { None },
         llm_commands: Vec::new(),
+        replacements: Default::default(),
     };
 
     let config_path = write_config(&config)?;
@@ -1600,7 +1601,7 @@ fn setup_uinput_permissions() {
                         }
                     } else {
                         // Write the rule inline if contrib file not found.
-                        let rule = "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\"\nKERNEL==\"uinput\", SUBSYSTEM==\"misc\", TEST==\"/usr/bin/setfacl\", RUN+=\"/usr/bin/setfacl -m g:input:rw /dev/$name\"";
+                        let rule = "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"\nKERNEL==\"uinput\", SUBSYSTEM==\"misc\", TEST==\"/usr/bin/setfacl\", RUN+=\"/usr/bin/setfacl -m g:input:rw /dev/$name\"";
                         let status = std::process::Command::new("sudo")
                             .args([
                                 "bash",

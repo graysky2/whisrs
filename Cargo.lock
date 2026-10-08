@@ -3689,6 +3689,7 @@ dependencies = [
  "notify-rust",
  "png",
  "prompt-echo",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
